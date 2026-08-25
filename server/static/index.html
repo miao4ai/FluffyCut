@@ -13,6 +13,7 @@
 
   <select id="project-select" title="切换工程"></select>
   <button class="ghost" id="btn-new" title="新建工程">＋</button>
+  <button class="ghost" id="btn-learn" title="读入一个参考片，扒它的节奏">学</button>
 
   <input id="title" class="title-input" placeholder="视频标题（会显示在顶部标题带）">
 
@@ -78,6 +79,14 @@
           <button class="ghost" id="btn-tts-all">全部重配</button>
         </div>
         <p class="hint">配音时长会写回 project.json，字幕时间轴自动跟着走。</p>
+      </div>
+    </details>
+
+    <details class="panel hidden" id="ref-panel">
+      <summary><span>参考片</span><span class="hint" id="ref-name"></span></summary>
+      <div class="panel-body">
+        <div id="ref-stats" class="ref-stats"></div>
+        <p class="hint">每句的 note 里记着它对应参考片的哪一段。照着这个节奏填自己的内容就行。</p>
       </div>
     </details>
 

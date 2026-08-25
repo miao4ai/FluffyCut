@@ -9,7 +9,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import tempfile
 import threading
 import traceback
@@ -22,6 +24,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from core import ai, layers, media, placeholder, render, subtitle, tts
+from core import analyze
 from core import project as project_module
 from core.project import Clip, Project, ProjectError, Visual, blank
 
@@ -47,12 +50,14 @@ class Job:
         self.note = ""
         self.error = ""
         self.out: str | None = None
+        self.result: dict[str, Any] | None = None   # 分析类任务的结果
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "id": self.id, "kind": self.kind, "project": self.project,
             "state": self.state, "progress": round(self.progress, 4),
             "note": self.note, "error": self.error, "out": self.out,
+            "result": self.result,
         }
 
 
@@ -130,6 +135,7 @@ def view(project: Project, name: str) -> dict[str, Any]:
             "tts": tts.get_engine("say").available(),
             "ai": ai_ok,
             "ai_note": ai_why,
+            "transcriber": analyze.transcriber_name(),
         },
     }
 
@@ -404,6 +410,81 @@ def start_render(name: str, payload: dict = Body(default={})) -> dict[str, Any]:
 
     threading.Thread(target=work, daemon=True).start()
     return job.as_dict()
+
+
+@app.post("/api/analyze")
+async def start_analyze(file: UploadFile = File(...), name: str = Query(""),
+                        transcribe: bool = Query(True)) -> dict[str, Any]:
+    """读入一个参考片，拆出它的节奏，生成一份同节奏的工程骨架。
+
+    解码整条视频不快，转写更慢，所以走后台任务，界面轮询 /api/jobs/{id}。
+    """
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in VIDEO_EXT + (".webm", ".mkv"):
+        raise HTTPException(400, f"参考片得是视频：{ext or '未知格式'}")
+
+    stem = Path(file.filename or "参考片").stem
+    target = _free_project_name(name or f"仿-{stem}")
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+        tmp.write(await file.read())
+        raw = Path(tmp.name)
+
+    job = Job("analyze", target)
+    JOBS[job.id] = job
+
+    def work() -> None:
+        try:
+            job.note = "找镜头切点…"
+            job.progress = 0.15
+            report = analyze.analyze(raw, with_text=False)
+            job.progress = 0.45
+
+            if transcribe and analyze.transcriber_name():
+                job.note = (f"转写台词（{analyze.transcriber_name()}）…"
+                            "首次使用要先下载语音模型，几百 MB，会慢一些")
+                got = analyze.transcribe(raw)
+                if got:
+                    segments, engine = got
+                    report.segments = [x for x in segments if x.duration >= analyze.MIN_SPEECH]
+                    report.source = engine
+            job.progress = 0.85
+
+            report.path = file.filename or report.path   # 报告里要出现用户认得的文件名
+            job.note = "生成同节奏的骨架…"
+            project = analyze.to_project(report, title=f"仿：{stem}")
+            project.extra["reference"] = {
+                "name": file.filename, "duration": report.duration,
+                "source": report.source, "stats": report.to_dict()["stats"],
+            }
+            root = PROJECTS_DIR / target
+            root.mkdir(parents=True, exist_ok=True)
+            project.save(root / "project.json")
+            (root / "analysis.json").write_text(
+                json.dumps(report.to_dict(), ensure_ascii=False, indent=2) + "\n", "utf-8")
+
+            job.result = {"project": target, "report": report.to_dict(),
+                          "summary": report.summary()}
+            job.out = f"{target}/project.json"
+            job.state = "done"
+            job.progress = 1.0
+        except Exception as e:                      # noqa: BLE001
+            job.state = "error"
+            job.error = str(e)
+            traceback.print_exc()
+        finally:
+            raw.unlink(missing_ok=True)
+
+    threading.Thread(target=work, daemon=True).start()
+    return job.as_dict()
+
+
+def _free_project_name(base: str) -> str:
+    """把名字收拾干净，重名就加序号。"""
+    safe = re.sub(r"[^\w\u4e00-\u9fff.-]+", "-", base).strip("-.") or "参考片"
+    name, i = safe, 2
+    while (PROJECTS_DIR / name).exists():
+        name, i = f"{safe}-{i}", i + 1
+    return name
 
 
 @app.get("/api/jobs/{job_id}")

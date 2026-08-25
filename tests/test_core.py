@@ -6,7 +6,7 @@
 import unittest
 from pathlib import Path
 
-from core import fonts, layers, subtitle
+from core import analyze, fonts, layers, subtitle
 from core.project import Clip, Project, ProjectError, estimate_duration
 from core.render import RenderOptions, build_command
 from core.tts import is_stale, text_sha
@@ -345,3 +345,61 @@ class TestRenderGraph(unittest.TestCase):
             )
             cmd = build_command(project, root / "o.mp4", root, RenderOptions())
         self.assertIn("volume=0.500", cmd[cmd.index("-filter_complex") + 1])
+
+
+class TestAnalyze(unittest.TestCase):
+    """拆解参考片。只测不碰 ffmpeg 的那部分：解析与骨架生成。"""
+
+    def test_silence_inverts_into_speech(self):
+        # 0-1 静音，说到 3，3-4 静音，说到 6
+        speech = analyze._invert_silence([0.0, 3.0], [1.0, 4.0], total=6.0)
+        self.assertEqual([(s.start, s.end) for s in speech], [(1.0, 3.0), (4.0, 6.0)])
+
+    def test_trailing_silence_without_end(self):
+        """片尾那段静音没有 silence_end，不能把最后一句吃掉。"""
+        speech = analyze._invert_silence([2.0], [], total=5.0)
+        self.assertEqual([(s.start, s.end) for s in speech], [(0.0, 2.0)])
+
+    def test_blips_shorter_than_min_speech_are_dropped(self):
+        speech = analyze._invert_silence([0.1, 1.0], [0.9, 3.0], total=3.0)
+        self.assertEqual(speech, [])          # 只剩 0.1s 的碎片，不算一句
+
+    def test_merge_cuts_dedupes_two_passes(self):
+        """亮度和色度两遍会抓到同一刀，差几十毫秒。"""
+        self.assertEqual(analyze.merge_cuts([2.0, 2.04, 7.0, 7.1, 10.0]), [2.0, 7.0, 10.0])
+
+    def test_skeleton_is_contiguous_and_matches_reference_length(self):
+        report = analyze.Report(path="ref.mp4", duration=10.0, segments=[
+            analyze.Segment(0.5, 2.5, "第一句"),
+            analyze.Segment(3.5, 6.0, "第二句"),
+            analyze.Segment(7.0, 9.5, "第三句"),
+        ])
+        p = analyze.to_project(report)
+        starts = [s for _c, s, _e in p.timeline()]
+        self.assertEqual(starts[0], 0.0)
+        self.assertAlmostEqual(p.duration, 10.0, places=1)      # 总长照抄参考片
+        self.assertEqual([c.text for c in p.clips], ["第一句", "第二句", "第三句"])
+
+    def test_cuts_inside_a_sentence_become_shots(self):
+        """参考片在一句话中间切了几刀，生成的片段就带几个镜头。"""
+        report = analyze.Report(path="ref.mp4", duration=6.0,
+                                segments=[analyze.Segment(0.0, 6.0, "一句话")],
+                                cuts=[2.0, 4.0])
+        p = analyze.to_project(report)
+        self.assertEqual(len(p.clips[0].visuals), 3)
+        self.assertIn("切了 2 刀", p.clips[0].note)
+
+    def test_no_speech_still_gives_a_usable_skeleton(self):
+        p = analyze.to_project(analyze.Report(path="ref.mp4", duration=8.0))
+        self.assertEqual(len(p.clips), 1)
+        self.assertEqual(p.clips[0].duration, 8.0)
+
+    def test_stats(self):
+        report = analyze.Report(path="ref.mp4", duration=60.0, cuts=[1.0, 2.0, 3.0], segments=[
+            analyze.Segment(0.0, 2.0, "四个字啊"),
+            analyze.Segment(3.0, 7.0, "八个字的一句话啊"),
+        ])
+        self.assertEqual(report.seconds_per_sentence, 3.0)
+        self.assertEqual(report.cuts_per_minute, 3.0)
+        self.assertEqual(report.speech_ratio, 0.1)
+        self.assertEqual(report.chars_per_second, 2.0)         # 12 字 / 6 秒

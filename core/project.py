@@ -532,7 +532,8 @@ class Project:
                 if v.type in ("image", "video") and not self.exists(v.path):
                     problems.append(f"{where}的素材找不到：{v.path}")
             fixed = sum(v.seconds for v in c.visuals if v.seconds)
-            if fixed > self.seconds_of(c) + 1e-6:
+            # 容差给一帧：时长吸附到帧之后，差个零点零几秒是正常的，不该当成错
+            if fixed > self.seconds_of(c) + 1 / self.video.fps:
                 problems.append(
                     f"第 {i} 句（{c.id}）的镜头时长加起来 {fixed:.2f}s，"
                     f"超过了本句的 {self.seconds_of(c):.2f}s"

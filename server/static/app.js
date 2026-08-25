@@ -36,12 +36,31 @@ function estimate(text) {
 }
 const paceOf = (s) => (s < PACE_MIN ? "fast" : s > PACE_MAX ? "slow" : "ok");
 
-function toast(msg, bad = false) {
+function toast(msg, bad = false, ms = 0) {
   const el = $("#toast");
   el.textContent = msg;
   el.className = "toast" + (bad ? " bad" : "");
   clearTimeout(toast.t);
-  toast.t = setTimeout(() => el.classList.add("hidden"), bad ? 6000 : 2600);
+  toast.t = setTimeout(() => el.classList.add("hidden"), ms || (bad ? 6000 : 2600));
+}
+
+/* 通用的后台任务轮询：渲染有自己的进度条，其它任务用这个就够 */
+function pollJob(id, onTick) {
+  return new Promise((resolve, reject) => {
+    const tick = async () => {
+      try {
+        const job = await api(`/api/jobs/${id}`);
+        if (job.state === "running") {
+          onTick?.(job);
+          return setTimeout(tick, 700);
+        }
+        job.state === "error" ? reject(new Error(job.error)) : resolve(job);
+      } catch (e) {
+        reject(e);
+      }
+    };
+    tick();
+  });
 }
 
 /* ---------------------------------------------------------------- 载入 */
@@ -88,6 +107,7 @@ function paintAll() {
   paintDerived();
   paintPreview();
   paintMusic();
+  paintReference();
 
   const c = state.caps;
   $("#caps-note").textContent =
@@ -118,6 +138,7 @@ function clipRow(c, i, dc) {
           <button class="shot add" data-act="shot-add" title="在这句里再加一个镜头">＋镜头</button>
         </div>
         ${trimRow(c, i, dc)}
+        ${c.note ? `<div class="note">${escapeHtml(c.note)}</div>` : ""}
         <div class="clip-meta">
           <span class="dur-bar" data-bar><i></i></span>
           <span class="dur" data-dur></span>
@@ -744,6 +765,7 @@ function bind() {
   };
 
   bindMusic();
+  $("#btn-learn").onclick = learnFromVideo;
   $("#project-select").onchange = (e) => open(e.target.value);
 
   $("#btn-new").onclick = async () => {
@@ -772,6 +794,62 @@ function bind() {
   window.addEventListener("beforeunload", (e) => {
     if ($("#save-state").classList.contains("dirty")) e.preventDefault();
   });
+}
+
+/* ---------------------------------------------------------------- 参考片 */
+
+function paintReference() {
+  const r = state.project.reference;
+  $("#ref-panel").classList.toggle("hidden", !r);
+  if (!r) return;
+  if (!paintReference.opened) {          // 刚学完一个片子，数字直接摊开给你看
+    $("#ref-panel").open = true;
+    paintReference.opened = true;
+  }
+  $("#ref-name").textContent = r.name || "";
+  const st = r.stats || {};
+  const rows = [
+    ["总长", `${(r.duration || 0).toFixed(1)} 秒`],
+    ["句数", st.sentences],
+    ["每句平均", `${st.seconds_per_sentence} 秒`],
+    ["中位数", `${st.median_sentence} 秒`],
+    ["人声占比", `${Math.round((st.speech_ratio || 0) * 100)}%`],
+    ["镜头切点", `${st.cuts} 次 · ${st.cuts_per_minute}/分钟`],
+  ];
+  if (st.chars_per_second) rows.push(["语速", `${st.chars_per_second} 字/秒`]);
+  rows.push(["台词来源", r.source === "silence" ? "按停顿切分（无转写）" : r.source]);
+  $("#ref-stats").innerHTML = rows
+    .map(([k, v]) => `<span>${k}</span><b>${v ?? "—"}</b>`)
+    .join("");
+}
+
+/* 读入一个参考片：上传 -> 后台分析 -> 打开生成的骨架 */
+function learnFromVideo() {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "video/*";
+  input.onchange = async () => {
+    const f = input.files?.[0];
+    if (!f) return;
+    const tr = state.caps?.transcriber;
+    toast(tr ? `正在拆解 ${f.name}（含转写，可能要一会儿）…` : `正在拆解 ${f.name}（没装 whisper，只扒节奏）…`);
+    const fd = new FormData();
+    fd.append("file", f);
+    try {
+      const job = await fetch(`/api/analyze?transcribe=${!!tr}`, { method: "POST", body: fd })
+        .then(async (r) => {
+          if (!r.ok) throw new Error((await r.json()).detail);
+          return r.json();
+        });
+      const done = await pollJob(job.id, (j) => toast(j.note || "分析中…"));
+      await loadProjects();
+      await open(done.result.project);
+      toast(done.result.summary.split("\n").slice(1).join(" · ").replace(/\s+/g, " "), false, 9000);
+    } catch (e) {
+      toast(e.message, true);
+    }
+  };
+  input.click();
 }
 
 /* ---------------------------------------------------------------- 配乐 */

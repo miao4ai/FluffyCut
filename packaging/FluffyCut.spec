@@ -48,7 +48,15 @@ a = Analysis(
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
-    excludes=["tkinter", "matplotlib", "pytest", "PyInstaller", "numpy"],
+    # 语音转写的 ML 栈不打进来：mlx/numba/scipy 那一坨会把 .app 从 100 MB 撑到 1.5 GB。
+    # 打包版仍然能拆节奏（那部分只用 ffmpeg），要转台词就装 whisper-cli：
+    #     brew install whisper-cpp
+    # core.analyze 会自动认出它。从源码跑的话 pip install mlx-whisper 也一样。
+    excludes=[
+        "tkinter", "matplotlib", "pytest", "PyInstaller", "numpy",
+        "mlx", "mlx_whisper", "faster_whisper", "whisper", "torch",
+        "numba", "llvmlite", "scipy", "transformers", "huggingface_hub", "tiktoken",
+    ],
     noarchive=False,
 )
 pyz = PYZ(a.pure)                     # noqa: F821

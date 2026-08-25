@@ -10,5 +10,10 @@ pywebview>=5.0
 # AI 辅助（可选）。不装也能用，AI 面板会自动置灰。
 anthropic>=1.0
 
+# 扒参考片台词（可选）。不装也能拆节奏，只是台词是空的。
+# Apple Silicon 上这个最快；也支持 faster-whisper / openai-whisper，
+# 或者装个二进制：brew install whisper-cpp
+mlx-whisper>=0.4
+
 # 打包成 .app 才需要（可选）
 # pyinstaller>=6.0

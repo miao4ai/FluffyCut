@@ -290,3 +290,15 @@ main { flex: 1; display: flex; min-height: 0; }
 
 .check { display: flex; align-items: center; gap: 7px; color: var(--text); font-size: 13px; }
 .check input { width: auto; }
+
+/* ---------- 参考片分析 ---------- */
+
+.ref-stats { display: grid; grid-template-columns: 1fr auto; gap: 3px 10px; font-size: 12px; }
+.ref-stats b { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 500; }
+.ref-stats span { color: var(--dim); }
+
+/* 片段上的来源批注 */
+.note {
+  margin-top: 6px; font-size: 11px; color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
