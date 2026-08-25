@@ -25,6 +25,7 @@ const state = {
   shot: 0,
   viewMode: "focus",
   playhead: 0,
+  frameT: null,
   refPlayhead: 0,
   refSelected: 0,
   pxPerSec: 60,
@@ -237,6 +238,51 @@ function shotChip(c, i, sh) {
     </button>`;
 }
 
+/* 一个镜头里的帧全铺开。
+   一张缩略图代表 3 秒的内容，等于把中间全藏起来了 —— 要按帧改，先得看见每一帧。
+   帧密度按镜头长度算，目标 0.15 秒一帧，封顶 60 帧。 */
+const FRAME_STEP = 0.15;
+const FRAME_MAX = 60;
+const FRAME_W = 54;
+
+function frameCount(seconds) {
+  return Math.max(4, Math.min(FRAME_MAX, Math.round((seconds || 1) / FRAME_STEP)));
+}
+
+function rangeStripUrl(sh, a, b, n) {
+  return `/api/p/${state.name}/strip?path=${encodeURIComponent(sh.path)}` +
+         `&count=${n}&w=${TILE_W}&start=${a.toFixed(3)}&end=${b.toFixed(3)}`;
+}
+
+function frameStrip(sh) {
+  if (sh.type !== "video" || !sh.exists || !sh.path) return "";
+  const a = sh.src_in || 0;
+  const b = sh.src_out ?? (a + sh.seconds * (sh.speed || 1));
+  const n = frameCount(b - a);
+  const url = rangeStripUrl(sh, a, b, n);
+  const h = Math.round(FRAME_W * (TILE_H / TILE_W));
+  const cells = Array.from({ length: n }, (_, k) => {
+    const t = a + ((k + 0.5) / n) * (b - a);
+    const on = Math.abs((state.frameT ?? -1) - t) < (b - a) / n / 2;
+    return `<button class="frame${on ? " on" : ""}" data-act="frame" data-t="${t.toFixed(3)}"
+              title="${t.toFixed(2)}s"
+              style="width:${FRAME_W}px;height:${h}px;background-image:url('${url}');
+                     background-size:${n * FRAME_W}px ${h}px;background-position:${-k * FRAME_W}px 0">
+              <b>${t.toFixed(1)}</b></button>`;
+  }).join("");
+  const picked = state.frameT != null && state.frameT >= a && state.frameT <= b;
+  return `
+    <div class="frames">
+      <div class="frames-strip">${cells}</div>
+      <div class="frames-act">
+        <span class="lab">${picked ? `选中 ${state.frameT.toFixed(2)}s` : "点一帧来改入出点或切开"}</span>
+        <button class="ghost" data-act="frame-in" ${picked ? "" : "disabled"}>设为入点</button>
+        <button class="ghost" data-act="frame-out" ${picked ? "" : "disabled"}>设为出点</button>
+        <button class="ghost" data-act="frame-split" ${picked ? "" : "disabled"}>在这里切开</button>
+      </div>
+    </div>`;
+}
+
 /* 选中的镜头是视频时，露出入出点/倍速 —— 剪辑最核心的三个数字 */
 function trimRow(c, i, dc) {
   if (state.selected !== i) return "";
@@ -244,6 +290,7 @@ function trimRow(c, i, dc) {
   if (!sh) return "";
   const isVideo = sh.type === "video";
   return `
+    ${frameStrip(sh)}
     <div class="trim">
       <span class="lab">镜头 ${sh.index + 1}</span>
       ${isVideo ? `
@@ -527,6 +574,56 @@ function setShotCrop(i, j, side, percent) {
   markDirty();
 }
 
+/* 选中一帧：预览跳过去，让人看清楚要在哪儿下刀 */
+function pickFrame(t) {
+  state.frameT = t;
+  paintList();
+  paintDerived();
+  const dc = state.derived?.clips?.[state.selected];
+  const sh = dc?.shots?.[state.shot];
+  if (dc && sh) {
+    // 素材时间换算回全片时间
+    const local = sh.start + (t - (sh.src_in || 0)) / (sh.speed || 1);
+    scrub(TRACKS.edit, dc.start + Math.max(0, local));
+  }
+}
+
+function frameEdge(i, which) {
+  if (state.frameT == null) return;
+  setShotField(i, state.shot, which, state.frameT.toFixed(3));
+  save().then(() => {
+    paintList();
+    paintDerived();
+  });
+}
+
+/* 在选中的帧上把镜头切成两个。两半各自记住自己占多久，
+   免得切完总时长跟着变 —— 切镜头不该改变这句话的长度。 */
+async function splitAtFrame(i) {
+  const arr = shotsOf(state.project.clips[i]);
+  const v = arr[state.shot];
+  const dc = state.derived?.clips?.[i];
+  const sh = dc?.shots?.[state.shot];
+  if (!v || !sh || state.frameT == null) return;
+
+  const a = sh.src_in || 0;
+  const b = sh.src_out ?? (a + sh.seconds * (sh.speed || 1));
+  const t = state.frameT;
+  if (t <= a + 0.05 || t >= b - 0.05) return toast("太靠边了，切不出两段", true);
+
+  const ratio = (t - a) / (b - a);
+  const left = { ...v, out: round3(t), seconds: round3(sh.seconds * ratio) };
+  const right = { ...v, in: round3(t), out: round3(b), seconds: round3(sh.seconds * (1 - ratio)) };
+  arr.splice(state.shot, 1, left, right);
+  setShots(state.project.clips[i], arr);
+  await save();
+  state.frameT = null;
+  select(i, state.shot + 1);
+  toast("切开了，右边这段成了新镜头");
+}
+
+const round3 = (x) => Math.round(x * 1000) / 1000;
+
 async function setTransition(i, type, duration) {
   const c = state.project.clips[i];
   if (!type) delete c.transition;
@@ -780,6 +877,10 @@ function bind() {
       case "shot-del":     e.stopPropagation(); return delShot(i, +btn.dataset.j);
       case "shot-add":     return pickMedia(i, 0, true);
       case "shot-replace": return pickMedia(i, state.shot, false);
+      case "frame":        return pickFrame(+btn.dataset.t);
+      case "frame-in":     return frameEdge(i, "in");
+      case "frame-out":    return frameEdge(i, "out");
+      case "frame-split":  return splitAtFrame(i);
       default:             return clipAction(i, btn.dataset.act);
     }
   });

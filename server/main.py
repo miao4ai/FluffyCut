@@ -541,11 +541,15 @@ def set_compare(name: str, payload: dict = Body(default={})) -> dict[str, Any]:
 
 @app.get("/api/p/{name}/strip")
 def strip(name: str, path: str = Query(...), count: int = Query(40),
-          w: int = Query(96)) -> Response:
-    """把一个素材抽成一条横向的胶片（雪碧图），时间轴上铺的就是它。
+          w: int = Query(96), start: float = Query(0.0),
+          end: float | None = Query(None)) -> Response:
+    """把一个素材抽成一条横向的胶片（雪碧图），时间轴和镜头帧条铺的都是它。
 
-    一次 ffmpeg 抽完整条并拼好，比一帧一个请求快一个数量级；结果按
-    素材的 mtime 缓存在工程的 .cache/ 里，改素材才会重抽。
+    一次 ffmpeg 抽完整段并拼好，比一帧一个请求快一个数量级；结果按素材 mtime +
+    参数缓存在工程的 .cache/ 里，改素材才会重抽。
+
+    start/end 限定只抽某一段：把某个镜头的 3 秒密集抽成几十帧靠的就是它，
+    整条素材均匀抽的话，一个镜头里根本剩不下几帧。
     """
     project = load(name)
     src = inside(project, path)
@@ -555,7 +559,7 @@ def strip(name: str, path: str = Query(...), count: int = Query(40),
     w = max(32, min(240, w))
 
     key = hashlib.sha1(
-        f"{path}|{src.stat().st_mtime}|{count}|{w}".encode()
+        f"{path}|{src.stat().st_mtime}|{count}|{w}|{start}|{end}".encode()
     ).hexdigest()[:16]
     cache = project.root / ".cache"
     cache.mkdir(exist_ok=True)
@@ -563,14 +567,19 @@ def strip(name: str, path: str = Query(...), count: int = Query(40),
 
     if not out.exists():
         if src.suffix.lower() in VIDEO_EXT + (".webm", ".mkv"):
-            dur = _cached_duration(src)
-            if dur <= 0:
+            total = _cached_duration(src)
+            if total <= 0:
                 raise HTTPException(422, "读不出时长")
+            a = max(0.0, min(start, total))
+            b = min(total, end if end is not None else total)
+            dur = max(0.05, b - a)
             exe = media.tool("ffmpeg")
             if not exe:
                 raise HTTPException(503, "找不到 ffmpeg")
+            seek = ["-ss", f"{a:.3f}", "-t", f"{dur:.3f}"] if (a > 0 or b < total) else []
             try:
-                media.run([exe, "-hide_banner", "-v", "error", "-nostdin", "-y", "-i", str(src),
+                media.run([exe, "-hide_banner", "-v", "error", "-nostdin", "-y",
+                           *seek, "-i", str(src),
                            "-vf", f"fps={count / dur:.6f},scale={w}:-2,tile={count}x1:padding=0",
                            "-frames:v", "1", "-q:v", "4", str(out)])
             except media.MediaError as e:
