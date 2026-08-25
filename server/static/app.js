@@ -29,6 +29,7 @@ const state = {
   frameClipT: null,
   refPlayhead: 0,
   refSelected: 0,
+  refShot: 0,
   pxPerSec: 60,
   compareOn: false,
   saveTimer: null,
@@ -1300,6 +1301,7 @@ function bindTrack(tr) {
 function bindTimeline() {
   bindTrack(TRACKS.ref);
   bindTrack(TRACKS.edit);
+  bindRefCard();
   document.querySelectorAll("[data-zoom]").forEach((b) => {
     b.onclick = () => {
       state.pxPerSec = Math.max(10, Math.min(400,
@@ -1338,20 +1340,85 @@ function paintRefCard(i) {
   state.refSelected = Math.max(0, Math.min(i ?? 0, rt.clips.length - 1));
   const c = rt.clips[state.refSelected];
   if (!c) return;
-  const sh = c.shots[0];
-  const bg = sh
-    ? `background-image:url('${stripUrl(sh)}');background-size:${stripCount(sh.src_seconds) * 44}px 78px;` +
-      `background-position:${-tileIndex(sh, sh.src_in) * 44}px 0`
-    : "";
+
+  // 镜头条：和编辑那边同样的样子，只是不能改
+  // 用背景图偏移取帧，不用 <img>：object-fit 会把宽度算式搅乱，取出来的就不是那一帧了
+  const CHIP_W = 62;
+  const CHIP_H = Math.round(CHIP_W * (TILE_H / TILE_W));
+  const chips = c.shots.map((sh, j) => {
+    const on = state.refShot === j;
+    const n = stripCount(sh.src_seconds);
+    const bg = `background-image:url('${stripUrl(sh)}');` +
+               `background-size:${n * CHIP_W}px ${CHIP_H}px;` +
+               `background-position:${-tileIndex(sh, sh.src_in) * CHIP_W}px 0`;
+    return `<button class="shot${on ? " on" : ""}" data-act="ref-shot" data-j="${j}"
+              style="width:${CHIP_W}px;height:${CHIP_H}px;${bg}"
+              title="原片 ${sh.src_in.toFixed(2)}–${(sh.src_out ?? 0).toFixed(2)}s">
+              <em>✂ ${sh.src_in.toFixed(1)}s</em><b>${sh.seconds.toFixed(2)}s</b>
+            </button>`;
+  }).join("");
+
+  const sh = c.shots[Math.min(state.refShot, c.shots.length - 1)];
   card.innerHTML = `
-    <div class="thumb" style="${bg}"></div>
-    <div class="body">
-      <div class="who">原片 · 第 ${state.refSelected + 1} 句 / 共 ${rt.clips.length}</div>
-      <div class="txt ${c.text ? "" : "empty"}">${escapeHtml(c.text || "（这一句没扒到台词）")}</div>
-      <div class="meta">${c.start.toFixed(2)}–${(c.start + c.seconds).toFixed(2)}s · ${c.seconds.toFixed(2)} 秒 · ${c.shots.length} 个镜头</div>
+    <div class="ins-head">
+      <b>原片</b>
+      <span>第 ${state.refSelected + 1} 句 / 共 ${rt.clips.length}</span>
+      <span class="hint">${c.start.toFixed(2)}–${(c.start + c.seconds).toFixed(2)}s · ${c.seconds.toFixed(2)} 秒 · ${c.shots.length} 个镜头</span>
+      <span class="spacer"></span>
+      <button class="ghost" data-act="ref-prev">←</button>
+      <button class="ghost" data-act="ref-next">→</button>
+      <button class="ghost" data-act="ref-copy-one">复制这一句到编辑轴</button>
     </div>
-    <button class="ghost" id="btn-copy-one">复制这一句</button>`;
-  $("#btn-copy-one").onclick = () => copyOneReference(state.refSelected);
+    <div class="ins-text ${c.text ? "" : "empty"}">${escapeHtml(c.text || "（这一句没扒到台词）")}</div>
+    <div class="shots">${chips}</div>
+    ${sh ? refFrameStrip(sh) : ""}`;
+}
+
+/* 原片的帧条：只读。点一帧就把原片的播放头挪过去，下半预览跟着走 —— 和编辑轴互不影响。 */
+function refFrameStrip(sh) {
+  const a = sh.src_in || 0;
+  const b = sh.src_out ?? (a + sh.seconds);
+  const n = frameCount(b - a);
+  const url = rangeStripUrl(sh, a, b, n);
+  const h = Math.round(FRAME_W * (TILE_H / TILE_W));
+  const cells = Array.from({ length: n }, (_, k) => {
+    const t = a + ((k + 0.5) / n) * (b - a);
+    return `<button class="frame" data-act="ref-frame" data-t="${t.toFixed(3)}" title="${t.toFixed(2)}s"
+              style="width:${FRAME_W}px;height:${h}px;background-image:url('${url}');
+                     background-size:${n * FRAME_W}px ${h}px;background-position:${-k * FRAME_W}px 0">
+              <b>${t.toFixed(1)}</b></button>`;
+  }).join("");
+  return `<div class="frames"><div class="frames-strip">${cells}</div></div>`;
+}
+
+function bindRefCard() {
+  $("#ref-card").addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-act]");
+    if (!btn) return;
+    switch (btn.dataset.act) {
+      case "ref-shot":
+        state.refShot = +btn.dataset.j;
+        return paintRefCard(state.refSelected);
+      case "ref-frame": {
+        const t = +btn.dataset.t;                 // 原片里的绝对时间
+        scrub(TRACKS.ref, t);
+        return;
+      }
+      case "ref-prev":
+      case "ref-next": {
+        const n = state.derived?.reference_timeline?.clips?.length || 1;
+        state.refShot = 0;
+        state.refSelected = Math.max(0, Math.min(n - 1,
+          state.refSelected + (btn.dataset.act === "ref-next" ? 1 : -1)));
+        const c = state.derived.reference_timeline.clips[state.refSelected];
+        scrub(TRACKS.ref, c.start + 0.02);
+        paintRefCard(state.refSelected);
+        return paintTrack(TRACKS.ref);
+      }
+      case "ref-copy-one":
+        return copyOneReference(state.refSelected);
+    }
+  });
 }
 
 async function copyWholeReference() {
