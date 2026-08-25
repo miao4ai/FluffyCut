@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FluffyCut</title>
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">FluffyCut<span>Cut the fluff.</span></div>
+
+  <select id="project-select" title="切换工程"></select>
+  <button class="ghost" id="btn-new" title="新建工程">＋</button>
+
+  <input id="title" class="title-input" placeholder="视频标题（会显示在顶部标题带）">
+
+  <div class="spacer"></div>
+
+  <div class="stats">
+    <b id="stat-clips">0</b> 句 · <b id="stat-duration">0.0</b> 秒
+    <span id="save-state" class="save-state">已保存</span>
+  </div>
+
+  <button id="btn-tts" class="ghost">配音</button>
+  <button id="btn-render" class="primary">渲染</button>
+</header>
+
+<div id="problems" class="problems hidden"></div>
+
+<main>
+  <!-- 左：句子列表 = 时间轴 -->
+  <section class="clips">
+    <div class="pace-strip" id="pace-strip" title="整片节奏：每段宽度 = 时长，颜色 = 快/合适/拖沓"></div>
+    <div id="clip-list"></div>
+    <button class="add-clip" id="btn-add">＋ 新增一句<kbd>⌘↵</kbd></button>
+  </section>
+
+  <!-- 右：预览 + 样式 + AI -->
+  <aside class="side">
+    <div class="preview-wrap">
+      <img id="preview" alt="预览">
+      <div class="preview-bar">
+        <button class="ghost" id="btn-play">▶ 通读</button>
+        <span id="preview-label"></span>
+      </div>
+      <audio id="audio" hidden></audio>
+    </div>
+
+    <details class="panel" open>
+      <summary><span>AI 助手</span><span class="hint" id="ai-note"></span></summary>
+      <div class="panel-body" id="ai-body">
+        <label>主题 / 草稿</label>
+        <textarea id="ai-topic" rows="3" placeholder="例：冰雹为什么夏天多？"></textarea>
+        <div class="row">
+          <input id="ai-count" type="number" min="3" max="20" value="8" title="大概几句">
+          <button class="ghost" id="btn-ai-split">拆成句子</button>
+          <button class="ghost" id="btn-ai-titles">起标题</button>
+        </div>
+        <div class="row">
+          <input id="ai-style" placeholder="配图风格，例：胶片质感、暗调" >
+          <button class="ghost" id="btn-ai-prompts">配图 prompt</button>
+        </div>
+        <div id="ai-out" class="ai-out"></div>
+      </div>
+    </details>
+
+    <details class="panel">
+      <summary>配音</summary>
+      <div class="panel-body">
+        <label>音色</label>
+        <select id="voice"></select>
+        <label>语速 <span id="rate-label">190</span> 字/分</label>
+        <input id="rate" type="range" min="120" max="300" step="5" value="190">
+        <div class="row">
+          <button class="ghost" id="btn-tts-stale">只补过期的</button>
+          <button class="ghost" id="btn-tts-all">全部重配</button>
+        </div>
+        <p class="hint">配音时长会写回 project.json，字幕时间轴自动跟着走。</p>
+      </div>
+    </details>
+
+    <details class="panel">
+      <summary><span>配乐</span><span class="hint" id="music-path"></span></summary>
+      <div class="panel-body">
+        <div class="row">
+          <button class="ghost" id="btn-music-pick">选音乐文件</button>
+          <button class="ghost" id="btn-music-clear">移除</button>
+        </div>
+        <div id="music-controls" class="panel-body" style="padding:0">
+          <label>音量 <span id="music-volume-label">18%</span></label>
+          <input id="music-volume" type="range" min="0" max="1" step="0.01">
+          <div class="row">
+            <label>淡入<input id="music-fadein" type="number" step="0.5" min="0"></label>
+            <label>淡出<input id="music-fadeout" type="number" step="0.5" min="0"></label>
+          </div>
+          <label class="check"><input id="music-duck" type="checkbox"> 说话时自动压低音乐</label>
+        </div>
+      </div>
+    </details>
+
+    <details class="panel">
+      <summary>模板样式</summary>
+      <div class="panel-body">
+        <label>字体</label><input id="st-font" placeholder="PingFang SC">
+        <label>标题颜色</label><input id="st-title-color" type="color">
+        <label>底部品牌文字</label><input id="st-brand" placeholder="拒绝废话">
+        <label>头像（工程内相对路径）</label><input id="st-avatar" placeholder="assets/avatar.png">
+        <p class="hint">模板写死在这里，每期只改内容不改排版。</p>
+      </div>
+    </details>
+
+    <details class="panel">
+      <summary>导出</summary>
+      <div class="panel-body">
+        <div class="row">
+          <button class="ghost" id="btn-placeholder">补占位配图</button>
+          <button class="ghost" id="btn-ass">导出 ASS</button>
+        </div>
+        <div id="render-box" class="render-box hidden">
+          <div class="bar"><i id="render-bar"></i></div>
+          <span id="render-note"></span>
+        </div>
+        <div id="render-out"></div>
+        <p class="hint" id="caps-note"></p>
+      </div>
+    </details>
+  </aside>
+</main>
+
+<div id="toast" class="toast hidden"></div>
+<script src="./app.js"></script>
+</body>
+</html>
