@@ -33,6 +33,21 @@
 <main>
   <!-- 左：句子列表 = 时间轴 -->
   <section class="clips">
+    <div class="tl-tools">
+      <span class="hint">时间轴</span>
+      <button class="ghost" data-zoom="out" title="拉远">−</button>
+      <span class="hint" id="tl-zoom">60 px/秒</span>
+      <button class="ghost" data-zoom="in" title="拉近">＋</button>
+      <span class="hint" id="tl-time">划过去看某一帧</span>
+      <span class="spacer"></span>
+      <label class="check"><input type="checkbox" id="tl-compare"> 对比原片</label>
+      <button class="ghost" id="btn-compare-pick" title="换一条对比片">选对比片</button>
+    </div>
+    <div class="timeline" id="timeline" title="鼠标划过去看那一帧，点一下跳到那一句">
+      <div class="tl-inner" id="tl-inner"></div>
+      <div class="tl-head" id="tl-head"></div>
+      <div class="tl-pop hidden" id="tl-pop"><i></i><b></b></div>
+    </div>
     <div class="pace-strip" id="pace-strip" title="整片节奏：每段宽度 = 时长，颜色 = 快/合适/拖沓"></div>
     <div id="clip-list"></div>
     <button class="add-clip" id="btn-add">＋ 新增一句<kbd>⌘↵</kbd></button>
@@ -42,6 +57,10 @@
   <aside class="side">
     <div class="preview-wrap">
       <img id="preview" alt="预览">
+      <div id="compare-box" class="compare-box hidden">
+        <img id="compare-img" alt="对比片">
+        <span class="compare-tag">原片</span>
+      </div>
       <div class="preview-bar">
         <button class="ghost" id="btn-play">▶ 通读</button>
         <span id="preview-label"></span>

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -102,6 +103,19 @@ def _cached_duration(path: Path) -> float:
     return _DURATION_CACHE[key]
 
 
+def _compare_info(project: Project) -> dict[str, Any] | None:
+    """对比片。没显式设过就看看工程里有没有导入时留下的原片。"""
+    conf = project.extra.get("compare")
+    if isinstance(conf, dict) and project.exists(conf.get("path")):
+        return {"path": conf["path"], "offset": float(conf.get("offset") or 0),
+                "duration": _cached_duration(project.resolve(conf["path"])), "auto": False}
+    for cand in sorted((project.root / "assets").glob("source.*")):
+        if cand.suffix.lower() in (".mp4", ".mov", ".m4v", ".webm", ".mkv"):
+            rel = project.relativize(cand)
+            return {"path": rel, "offset": 0.0, "duration": _cached_duration(cand), "auto": True}
+    return None
+
+
 def _music_info(project: Project) -> dict[str, Any] | None:
     """配乐够不够长、要循环几遍 —— 界面上得让人看见，不然「起点」是个瞎填的数字。"""
     m = project.music
@@ -151,6 +165,8 @@ def view(project: Project, name: str) -> dict[str, Any]:
                         "src_out": v.src_out,
                         "speed": v.speed,
                         "crop": dict(zip(("top", "right", "bottom", "left"), v.crop)),
+                        "src_seconds": (_cached_duration(project.resolve(v.path))
+                                        if v.type == "video" and project.exists(v.path) else 0.0),
                         "exists": v.type == "color" or project.exists(v.path),
                     }
                     for j, (v, s0, dur) in enumerate(project.shots_of(c))
@@ -159,6 +175,7 @@ def view(project: Project, name: str) -> dict[str, Any]:
             for i, (c, start, _e) in enumerate(timeline)
         ],
         "transitions": list(project_module.TRANSITIONS),
+        "compare": _compare_info(project),
         "music": _music_info(project),
     }
     ai_ok, ai_why = ai.available()
@@ -400,6 +417,84 @@ def thumb(name: str, path: str = Query(...), w: int = Query(160),
                     headers={"Cache-Control": "no-cache"})
 
 
+@app.post("/api/p/{name}/compare")
+def set_compare(name: str, payload: dict = Body(default={})) -> dict[str, Any]:
+    """设一条对比片：预览里下半部分放它，用来照着改。
+
+    传 path 就用那个本地文件（拷进工程）；传空就是取消。
+    导进来的工程默认拿 assets/source.* 当对比片，不用手动设。
+    """
+    project = load(name)
+    raw = str(payload.get("path") or "").strip()
+    if not raw:
+        project.extra.pop("compare", None)
+        project.save()
+        return view(project, name)
+
+    src = Path(raw).expanduser()
+    if src.is_file():                       # 外面的文件，拷进工程
+        ext = src.suffix.lower()
+        if ext not in VIDEO_EXT + (".webm", ".mkv"):
+            raise HTTPException(400, f"对比片得是视频：{ext}")
+        rel = f"assets/compare{ext}"
+        shutil.copy2(src, inside(project, rel))
+    elif project.exists(raw):               # 已经在工程里
+        rel = raw
+    else:
+        raise HTTPException(404, f"文件不存在：{raw}")
+
+    project.extra["compare"] = {"path": rel, "offset": float(payload.get("offset") or 0)}
+    project.save()
+    return view(project, name)
+
+
+@app.get("/api/p/{name}/strip")
+def strip(name: str, path: str = Query(...), count: int = Query(40),
+          w: int = Query(96)) -> Response:
+    """把一个素材抽成一条横向的胶片（雪碧图），时间轴上铺的就是它。
+
+    一次 ffmpeg 抽完整条并拼好，比一帧一个请求快一个数量级；结果按
+    素材的 mtime 缓存在工程的 .cache/ 里，改素材才会重抽。
+    """
+    project = load(name)
+    src = inside(project, path)
+    if not src.is_file():
+        raise HTTPException(404, "素材不存在")
+    count = max(1, min(240, count))
+    w = max(32, min(240, w))
+
+    key = hashlib.sha1(
+        f"{path}|{src.stat().st_mtime}|{count}|{w}".encode()
+    ).hexdigest()[:16]
+    cache = project.root / ".cache"
+    cache.mkdir(exist_ok=True)
+    out = cache / f"strip_{key}.jpg"
+
+    if not out.exists():
+        if src.suffix.lower() in VIDEO_EXT + (".webm", ".mkv"):
+            dur = _cached_duration(src)
+            if dur <= 0:
+                raise HTTPException(422, "读不出时长")
+            exe = media.tool("ffmpeg")
+            if not exe:
+                raise HTTPException(503, "找不到 ffmpeg")
+            try:
+                media.run([exe, "-hide_banner", "-v", "error", "-nostdin", "-y", "-i", str(src),
+                           "-vf", f"fps={count / dur:.6f},scale={w}:-2,tile={count}x1:padding=0",
+                           "-frames:v", "1", "-q:v", "4", str(out)])
+            except media.MediaError as e:
+                raise HTTPException(422, str(e)) from e
+        else:
+            from PIL import Image
+
+            img = Image.open(src).convert("RGB")
+            img.thumbnail((w, 4000))
+            img.save(out, "JPEG", quality=82)
+
+    return Response(out.read_bytes(), media_type="image/jpeg",
+                    headers={"Cache-Control": "max-age=60", "X-Tiles": str(count)})
+
+
 @app.get("/api/p/{name}/probe")
 def probe_asset(name: str, path: str = Query(...)) -> dict[str, Any]:
     """素材信息。剪视频要知道它到底多长。"""
@@ -431,12 +526,28 @@ def make_placeholder(name: str, payload: dict = Body(default={})) -> dict[str, A
 
 
 @app.get("/api/p/{name}/frame")
-def frame(name: str, clip: str = Query(...), t: float = Query(0.0)) -> Response:
-    """预览帧：和成片同一套 PIL 合成代码，所见即所得。"""
+def frame(name: str, clip: str = Query(""), t: float = Query(0.0),
+          at: float | None = Query(None)) -> Response:
+    """预览帧：和成片同一套 PIL 合成代码，所见即所得。
+
+    给 at 就是按**全片时间轴**取帧（时间轴上划过去用这个），
+    给 clip+t 是按某一句的句内时间取帧。
+    """
     import io
 
     project = load(name)
-    img = layers.compose_frame(project, project.clip(clip), t)
+    if at is not None:
+        target, offset = project.clips[0], 0.0
+        for c, start, end in project.timeline():
+            if start <= at < end:
+                target, offset = c, at - start
+                break
+        else:
+            target = project.clips[-1]
+            offset = max(0.0, at - project.timeline()[-1][1])
+        img = layers.compose_frame(project, target, offset)
+    else:
+        img = layers.compose_frame(project, project.clip(clip), t)
     img.thumbnail((540, 960))
     buf = io.BytesIO()
     img.save(buf, "JPEG", quality=88)

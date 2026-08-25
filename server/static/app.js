@@ -23,6 +23,9 @@ const state = {
   caps: {},
   selected: 0,
   shot: 0,
+  playhead: 0,
+  pxPerSec: 60,
+  compareOn: false,
   saveTimer: null,
   playing: false,
 };
@@ -116,6 +119,14 @@ function paintAll() {
   paintPreview();
   paintMusic();
   paintReference();
+  paintTimeline();
+  // 导进来的工程默认摆上原片对照 —— 「照着原片改」正是它的用法
+  if (state.derived?.compare?.auto && !paintTimeline.autoCompared) {
+    paintTimeline.autoCompared = true;
+    state.compareOn = true;
+    $("#tl-compare").checked = true;
+  }
+  paintPreviewAt(state.playhead);
 
   paintCaps();
 }
@@ -295,8 +306,13 @@ function paintPreview() {
   const c = state.project.clips[state.selected];
   if (!c) return;
   // 预览定位到当前镜头的起点，切镜头就能立刻看到那一格
-  const sh = state.derived?.clips?.[state.selected]?.shots?.[state.shot];
+  const dc = state.derived?.clips?.[state.selected];
+  const sh = dc?.shots?.[state.shot];
   const t = sh ? sh.start + 0.02 : 0;
+  if (dc) {
+    state.playhead = dc.start + t;      // 播放头跟着选中的镜头走
+    moveHead(state.playhead);
+  }
   $("#preview").src =
     `/api/p/${state.name}/frame?clip=${encodeURIComponent(c.id)}&t=${t.toFixed(2)}&v=${Date.now()}`;
   $("#preview-label").textContent =
@@ -800,6 +816,7 @@ function bind() {
   };
 
   bindMusic();
+  bindTimeline();
   $("#btn-learn").onclick = learnFromVideo;
   $("#project-select").onchange = (e) => open(e.target.value);
 
@@ -831,6 +848,188 @@ function bind() {
   window.addEventListener("beforeunload", (e) => {
     if ($("#save-state").classList.contains("dirty")) e.preventDefault();
   });
+}
+
+/* ---------------------------------------------------------------- 横向时间轴
+
+   一条从左到右的胶片：鼠标划到哪儿就看到哪一帧。
+   帧不是一张一个请求 —— 每个素材抽成一条雪碧图（服务端一次 ffmpeg 抽完并缓存），
+   格子只是把雪碧图挪到对应偏移，所以划得再快也不掉帧。 */
+
+const TILE_W = 96;                 // 雪碧图每格宽度，和 /strip 的 w 一致
+const TILE_H = 170;
+// 抽帧密度：目标每 0.4 秒一格，长片封顶 240 格（再多就是给浏览器添堵）。
+// 固定格数的话，长素材会稀得没法用 —— "抽帧不够细"就是这么来的。
+const STRIP_STEP = 0.4;
+const STRIP_MAX = 240;
+const stripCount = (seconds) =>
+  Math.max(8, Math.min(STRIP_MAX, Math.ceil((seconds || 1) / STRIP_STEP)));
+const TRACK_H = 76;                // 轨道高度
+// 雪碧图整体缩到轨道高度，一格就是这么宽 —— 不缩的话只能看见每帧的上面一截
+const TILE_SCALE = TRACK_H / TILE_H;
+const CELL_W = Math.round(TILE_W * TILE_SCALE);
+
+function stripUrl(sh) {
+  const n = sh.type === "video" ? stripCount(sh.src_seconds) : 1;
+  return `/api/p/${state.name}/strip?path=${encodeURIComponent(sh.path)}&count=${n}&w=${TILE_W}`;
+}
+
+/* 素材内的某个时刻 -> 雪碧图里的第几格 */
+function tileIndex(sh, srcTime) {
+  if (sh.type !== "video" || !sh.src_seconds) return 0;
+  const n = stripCount(sh.src_seconds);
+  return Math.max(0, Math.min(n - 1, Math.floor((srcTime / sh.src_seconds) * n)));
+}
+
+/* 轨道上的一格：整条雪碧图缩到轨道高度，再挪到对应偏移 */
+function cellStyle(sh, srcTime, w) {
+  const n = sh.type === "video" ? stripCount(sh.src_seconds) : 1;
+  const i = tileIndex(sh, srcTime);
+  return `width:${w}px;height:${TRACK_H}px;background-image:url('${stripUrl(sh)}');` +
+         `background-size:${n * CELL_W}px ${TRACK_H}px;background-position:${-i * CELL_W}px 0`;
+}
+
+function paintTimeline() {
+  const inner = $("#tl-inner");
+  const d = state.derived;
+  if (!d) return;
+  const px = state.pxPerSec;
+  $("#tl-zoom").textContent = `${px} px/秒`;
+
+  inner.innerHTML = d.clips
+    .map((c, i) => {
+      const w = Math.max(2, c.seconds * px);
+      const shots = (c.shots || [])
+        .map((sh) => {
+          const sw = Math.max(1, sh.seconds * px);
+          if (!sh.exists || !sh.path) {
+            return `<div class="tl-shot" style="width:${sw}px"><div class="tl-empty"></div></div>`;
+          }
+          const n = Math.max(1, Math.ceil(sw / CELL_W));
+          const tiles = Array.from({ length: n }, (_, k) => {
+            const local = (k * CELL_W) / px;                     // 这一格在镜头内的时间
+            const src = (sh.src_in || 0) + local * (sh.speed || 1);
+            const tw = Math.min(CELL_W, sw - k * CELL_W);
+            return `<div class="tl-tile" style="${cellStyle(sh, src, tw)}"></div>`;
+          }).join("");
+          return `<div class="tl-shot" style="width:${sw}px">${tiles}</div>`;
+        })
+        .join("");
+      return `<div class="tl-clip ${c.pace}${i === state.selected ? " on" : ""}" data-i="${i}"
+                   style="width:${w}px"><span class="cap">${i + 1}. ${escapeHtml(
+        (state.project.clips[i]?.text || "").slice(0, 20))}</span>${shots}</div>`;
+    })
+    .join("");
+  moveHead(state.playhead);
+}
+
+function timeAt(clientX) {
+  const box = $("#timeline");
+  const r = box.getBoundingClientRect();
+  const x = clientX - r.left + box.scrollLeft;
+  return Math.max(0, Math.min(state.derived?.duration || 0, x / state.pxPerSec));
+}
+
+function moveHead(t) {
+  const box = $("#timeline");
+  $("#tl-head").style.left = `${t * state.pxPerSec - box.scrollLeft}px`;
+}
+
+/* 悬停：先用雪碧图里的那一格给个即时反馈，停下来再去要一张真正合成的帧 */
+function scrub(t, { pop = null } = {}) {
+  state.playhead = t;
+  moveHead(t);
+  $("#tl-time").textContent = `${t.toFixed(2)}s`;
+
+  const hit = shotAtTime(t);
+  const popEl = $("#tl-pop");
+  if (pop !== null && hit) {
+    popEl.classList.remove("hidden");
+    popEl.style.left = `${t * state.pxPerSec - $("#timeline").scrollLeft}px`;
+    const cell = popEl.querySelector("i");
+    const n = hit.sh.type === "video" ? stripCount(hit.sh.src_seconds) : 1;
+    cell.style.backgroundImage = hit.sh.exists && hit.sh.path ? `url('${stripUrl(hit.sh)}')` : "none";
+    cell.style.backgroundSize = `${n * TILE_W}px ${TILE_H}px`;
+    cell.style.backgroundPosition = `${-tileIndex(hit.sh, hit.srcTime) * TILE_W}px 0`;
+    popEl.querySelector("b").textContent = `${t.toFixed(2)}s`;
+  }
+  clearTimeout(scrub.t);
+  scrub.t = setTimeout(() => paintPreviewAt(t), 180);
+}
+
+/* 全片第 t 秒落在哪个镜头、对应素材的哪一刻 */
+function shotAtTime(t) {
+  const d = state.derived;
+  if (!d) return null;
+  for (let i = 0; i < d.clips.length; i++) {
+    const c = d.clips[i];
+    if (t < c.start || t >= c.start + c.seconds) continue;
+    const local = t - c.start;
+    for (const sh of c.shots || []) {
+      if (local >= sh.start && local < sh.start + sh.seconds) {
+        return { i, sh, srcTime: (sh.src_in || 0) + (local - sh.start) * (sh.speed || 1) };
+      }
+    }
+  }
+  return null;
+}
+
+function bindTimeline() {
+  const box = $("#timeline");
+  box.addEventListener("mousemove", (e) => scrub(timeAt(e.clientX), { pop: true }));
+  box.addEventListener("mouseleave", () => $("#tl-pop").classList.add("hidden"));
+  box.addEventListener("scroll", () => moveHead(state.playhead));
+  box.addEventListener("click", (e) => {
+    const t = timeAt(e.clientX);
+    const hit = shotAtTime(t);
+    scrub(t);
+    if (hit) select(hit.i, hit.sh.index);
+  });
+  document.querySelectorAll("[data-zoom]").forEach((b) => {
+    b.onclick = () => {
+      state.pxPerSec = Math.max(10, Math.min(400,
+        Math.round(state.pxPerSec * (b.dataset.zoom === "in" ? 1.6 : 1 / 1.6))));
+      paintTimeline();
+    };
+  });
+  $("#tl-compare").onchange = (e) => {
+    state.compareOn = e.target.checked;
+    paintPreviewAt(state.playhead);
+  };
+  $("#btn-compare-pick").onclick = async () => {
+    const native = await pickNativePath("video");
+    if (!native) return toast("桌面版才能直接选文件；浏览器里请用「学参考片」导入", true);
+    try {
+      apply(await api(`/api/p/${state.name}/compare`, {
+        method: "POST", body: JSON.stringify({ path: native }),
+      }));
+      $("#tl-compare").checked = state.compareOn = true;
+      paintPreviewAt(state.playhead);
+      toast("对比片已设好");
+    } catch (e) {
+      toast(e.message, true);
+    }
+  };
+}
+
+/* 预览：上半是你正在改的，下半（可选）是对比片同一时刻 */
+function paintPreviewAt(t) {
+  if (!state.derived) return;
+  $("#preview").src = `/api/p/${state.name}/frame?at=${t.toFixed(2)}&v=${Date.now()}`;
+  const hit = shotAtTime(t);
+  $("#preview-label").textContent = hit
+    ? `${t.toFixed(2)}s · 第 ${hit.i + 1} 句 · 镜头 ${hit.sh.index + 1}`
+    : `${t.toFixed(2)}s`;
+
+  const cmp = state.derived.compare;
+  const box = $("#compare-box");
+  const show = state.compareOn && !!cmp;
+  box.classList.toggle("hidden", !show);
+  if (show) {
+    const ct = Math.max(0, t + (cmp.offset || 0));
+    $("#compare-img").src =
+      `/api/p/${state.name}/thumb?path=${encodeURIComponent(cmp.path)}&t=${ct.toFixed(2)}&w=480`;
+  }
 }
 
 /* ---------------------------------------------------------------- 选文件 */

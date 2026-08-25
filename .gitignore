@@ -22,3 +22,4 @@ projects/**/*.mp4
 !projects/edit-demo/assets/clip.mp4
 
 .DS_Store
+projects/**/.cache/

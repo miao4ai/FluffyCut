@@ -342,3 +342,65 @@ main { flex: 1; display: flex; min-height: 0; }
 .trim.crop .hint { margin-left: auto; font-size: 11px; }
 
 .topbar button { white-space: nowrap; }   /* 窄窗口时按钮别竖着断行 */
+
+/* ---------- 横向时间轴：胶片 + 播放头 ---------- */
+
+.tl-tools {
+  display: flex; align-items: center; gap: 8px;
+  padding: 0 2px 6px; font-size: 12px;
+}
+.tl-tools .spacer { flex: 1; }
+.tl-tools button { padding: 1px 8px; }
+.tl-tools .check { font-size: 12px; }
+
+.timeline {
+  position: relative; overflow-x: auto; overflow-y: hidden;
+  border: 1px solid var(--line); border-radius: 8px; background: #0b0c0f;
+  cursor: crosshair; user-select: none;
+}
+.tl-inner { display: flex; height: 76px; }
+.tl-tile { background-color: #15171d; }
+
+.tl-clip {
+  position: relative; display: flex; flex: none;
+  border-right: 1px solid #0008;
+  box-shadow: inset 0 -2px 0 var(--ok);
+}
+.tl-clip.fast { box-shadow: inset 0 -2px 0 var(--warn); }
+.tl-clip.slow { box-shadow: inset 0 -2px 0 var(--bad); }
+.tl-clip.on   { outline: 1px solid var(--accent); outline-offset: -1px; z-index: 2; }
+.tl-clip .cap {
+  position: absolute; left: 4px; top: 3px; right: 4px;
+  font-size: 10px; color: #fff; text-shadow: 0 1px 3px #000, 0 0 8px #000;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none;
+}
+.tl-shot { flex: none; overflow: hidden; display: flex; }
+.tl-shot + .tl-shot { border-left: 1px dashed #ffffff33; }
+.tl-tile { flex: none; background-repeat: no-repeat; background-color: #15171d; }
+.tl-empty { flex: 1; background: repeating-linear-gradient(45deg, #1a1d24, #1a1d24 6px, #14161c 6px, #14161c 12px); }
+
+.tl-head {
+  position: absolute; top: 0; bottom: 0; width: 1px; background: var(--accent);
+  pointer-events: none; box-shadow: 0 0 6px var(--accent);
+}
+.tl-pop {
+  position: absolute; bottom: 82px; transform: translateX(-50%);
+  padding: 3px; border-radius: 6px; background: #000d; border: 1px solid var(--line);
+  pointer-events: none; z-index: 5;
+}
+.tl-pop i { display: block; width: 96px; height: 170px; background-repeat: no-repeat; border-radius: 3px; }
+.tl-pop b {
+  display: block; text-align: center; font: 500 10px/1.6 ui-monospace, monospace; color: var(--accent);
+}
+
+/* ---------- 对比片 ---------- */
+
+.compare-box { position: relative; margin-top: 8px; }
+.compare-box img {
+  width: 100%; display: block; border-radius: 8px; border: 1px solid var(--line);
+}
+.compare-tag {
+  position: absolute; left: 8px; top: 8px;
+  padding: 1px 7px; border-radius: 4px; font-size: 11px;
+  background: #000b; color: var(--accent);
+}
