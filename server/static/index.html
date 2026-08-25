@@ -98,7 +98,7 @@
       </div>
     </details>
 
-    <details class="panel">
+    <details class="panel" id="panel-music">
       <summary><span>配乐</span><span class="hint" id="music-path"></span></summary>
       <div class="panel-body">
         <div class="row">
@@ -106,6 +106,17 @@
           <button class="ghost" id="btn-music-clear">移除</button>
         </div>
         <div id="music-controls" class="panel-body" style="padding:0">
+          <audio id="music-player" controls preload="none"></audio>
+          <p class="hint" id="music-info"></p>
+          <div class="row">
+            <button class="ghost" id="btn-music-mark">用当前播放位置作为起点</button>
+          </div>
+          <div class="row">
+            <button class="ghost" id="btn-music-devocal">去掉人声</button>
+            <button class="ghost" id="btn-music-restore" title="还原成处理前那一版">还原</button>
+          </div>
+          <label class="check"><input id="music-keepbass" type="checkbox"> 保留低音（人声会残留一点）</label>
+          <p class="hint" id="music-devocal-note"></p>
           <label>音量 <span id="music-volume-label">18%</span></label>
           <input id="music-volume" type="range" min="0" max="1" step="0.01">
           <div class="row">

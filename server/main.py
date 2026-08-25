@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
+import shutil
 import tempfile
 import threading
 import traceback
@@ -24,7 +26,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from core import ai, layers, media, placeholder, render, subtitle, tts
-from core import analyze
+from core import analyze, audio
 from core import project as project_module
 from core import settings
 from core.project import Clip, Project, ProjectError, Visual, blank
@@ -88,6 +90,37 @@ def inside(project: Project, rel: str) -> Path:
     return target
 
 
+_DURATION_CACHE: dict[tuple[str, float], float] = {}
+
+
+def _cached_duration(path: Path) -> float:
+    """探时长会起 ffprobe 子进程，而 view() 每次保存都要调 —— 按文件 mtime 缓存。"""
+    key = (str(path), path.stat().st_mtime)
+    if key not in _DURATION_CACHE:
+        _DURATION_CACHE.clear()
+        _DURATION_CACHE[key] = media.duration(path)
+    return _DURATION_CACHE[key]
+
+
+def _music_info(project: Project) -> dict[str, Any] | None:
+    """配乐够不够长、要循环几遍 —— 界面上得让人看见，不然「起点」是个瞎填的数字。"""
+    m = project.music
+    if not m or not project.exists(m.path):
+        return None
+    src = project.resolve(m.path)
+    assert src is not None
+    total = _cached_duration(src)
+    usable = max(0.0, total - max(0.0, m.start))
+    need = project.duration
+    return {
+        "duration": round(total, 2),
+        "usable": round(usable, 2),
+        "needed": round(need, 2),
+        "loops": max(0, math.ceil(need / usable) - 1) if usable > 0.01 else 0,
+        "channels": audio.channels(src),
+    }
+
+
 def view(project: Project, name: str) -> dict[str, Any]:
     """给界面的完整状态：原始工程 + 派生信息 + 能力探测。"""
     timeline = project.timeline()
@@ -125,6 +158,7 @@ def view(project: Project, name: str) -> dict[str, Any]:
             for i, (c, start, _e) in enumerate(timeline)
         ],
         "transitions": list(project_module.TRANSITIONS),
+        "music": _music_info(project),
     }
     ai_ok, ai_why = ai.available()
     return {
@@ -137,6 +171,7 @@ def view(project: Project, name: str) -> dict[str, Any]:
             "ai": ai_ok,
             "ai_note": ai_why,
             "transcriber": analyze.transcriber_name(),
+            "demucs": audio.has_demucs(),
             "ai_source": ai.credential()[1],
             "ai_key_masked": settings.mask(settings.get("anthropic_api_key")),
             "ai_model": ai.model(),
@@ -414,6 +449,61 @@ def start_render(name: str, payload: dict = Body(default={})) -> dict[str, Any]:
 
     threading.Thread(target=work, daemon=True).start()
     return job.as_dict()
+
+
+@app.post("/api/p/{name}/music/remove_vocals")
+def start_remove_vocals(name: str, payload: dict = Body(default={})) -> dict[str, Any]:
+    """把配乐里的人声去掉。原文件会先备份成 bgm.orig.<ext>，随时能还原。"""
+    project = load(name)
+    if not project.music or not project.exists(project.music.path):
+        raise HTTPException(400, "还没有配乐")
+    src = project.resolve(project.music.path)
+    assert src is not None
+
+    job = Job("remove_vocals", name)
+    JOBS[job.id] = job
+    keep_bass = bool(payload.get("keep_bass"))
+    method = str(payload.get("method") or "auto")
+
+    def work() -> None:
+        try:
+            backup = src.with_name(f"{src.stem}.orig{src.suffix}")
+            if not backup.exists():
+                shutil.copy2(src, backup)      # 只备份一次，别把处理过的当原件
+            dest = src.with_name(f"{src.stem}.novocal.m4a")
+            audio.remove_vocals(backup, dest, method=method, keep_bass=keep_bass,
+                                on_progress=lambda p, note: (setattr(job, "progress", p),
+                                                             setattr(job, "note", note)))
+            fresh = load(name)                 # 期间人可能改过工程，重新读一份再写
+            fresh.music.path = fresh.relativize(dest)
+            fresh.save()
+            job.result = {"path": fresh.music.path,
+                          "method": audio.vocal_remover(method),
+                          "backup": fresh.relativize(backup)}
+            job.state = "done"
+            job.progress = 1.0
+        except Exception as e:                  # noqa: BLE001
+            job.state = "error"
+            job.error = str(e)
+            traceback.print_exc()
+
+    threading.Thread(target=work, daemon=True).start()
+    return job.as_dict()
+
+
+@app.post("/api/p/{name}/music/restore")
+def restore_music(name: str) -> dict[str, Any]:
+    """把配乐还原成去人声之前的那一版。"""
+    project = load(name)
+    if not project.music:
+        raise HTTPException(400, "还没有配乐")
+    src = project.resolve(project.music.path)
+    stem = src.stem.replace(".novocal", "") if src else ""
+    for cand in (project.root / "assets").glob(f"{stem}.orig.*"):
+        project.music.path = project.relativize(cand)
+        project.save()
+        return view(project, name)
+    raise HTTPException(404, "没有找到备份，可能从来没处理过")
 
 
 @app.get("/api/settings")

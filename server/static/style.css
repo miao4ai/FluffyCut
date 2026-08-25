@@ -332,3 +332,7 @@ main { flex: 1; display: flex; min-height: 0; }
 
 #ai-key-box .row { gap: 6px; }
 #ai-key-box input { flex: 1; font-family: ui-monospace, monospace; font-size: 12px; }
+
+/* 配乐试听 */
+#music-player { width: 100%; height: 32px; margin-bottom: 8px; }
+#music-devocal-note { margin-top: 2px; }

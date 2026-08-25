@@ -84,10 +84,13 @@ async function open(name) {
   const wanted = +(params.get("clip") ?? 0);
   const wantNew = params.has("new");
 
+
   apply(await api(`/api/p/${name}`), name);
   history.replaceState(null, "", `?p=${name}`);
   if (wanted > 0) select(wanted);          // ?clip=2 直接定位到第 3 句，方便分享/排查
   if (wantNew) openNewDialog();
+  const panel = params.get("open");            // ?open=music 直接展开某个面板
+  if (panel) document.getElementById(`panel-${panel}`)?.setAttribute("open", "");
 }
 
 function apply(data, name = state.name) {
@@ -939,9 +942,27 @@ function learnFromVideo() {
 
 function paintMusic() {
   const m = state.project.music;
+  const info = state.derived?.music;
   $("#music-path").textContent = m?.path || "还没选音乐";
   $("#music-controls").classList.toggle("off", !m);
   if (!m) return;
+
+  // 让人看见这段音乐到底多长、够不够铺满片子 —— 不然「起点」就是个瞎填的数字
+  const player = $("#music-player");
+  const url = `/api/p/${state.name}/file/${m.path}`;
+  if (player.dataset.src !== url) {
+    player.src = url;
+    player.dataset.src = url;
+  }
+  if (info) {
+    const loops = info.loops > 0 ? `，会循环 ${info.loops} 遍铺满` : "，够铺满";
+    const mono = info.channels < 2 ? " · 单声道" : "";
+    $("#music-info").textContent =
+      `音乐 ${info.duration}s · 片子要 ${info.needed}s · 从 ${m.start}s 起用${loops}${mono}`;
+  }
+  $("#music-devocal-note").textContent = state.caps?.demucs
+    ? "用 demucs 分离，质量好但慢"
+    : "中置抵消：居中的人声会被完全消掉，同样居中的贝斯/底鼓也会一起没";
   $("#music-volume").value = m.volume;
   $("#music-volume-label").textContent = Math.round(m.volume * 100) + "%";
   $("#music-fadein").value = m.fade_in;
@@ -973,6 +994,41 @@ function bindMusic() {
       }
     };
     input.click();
+  };
+
+  // 一边听一边定起点：听到副歌开始，点一下就写进去
+  $("#btn-music-mark").onclick = () => {
+    const t = Math.max(0, Math.round($("#music-player").currentTime * 10) / 10);
+    if (!state.project.music) return;
+    state.project.music.start = t;
+    $("#music-start").value = t;
+    markDirty();
+    toast(`起点设成 ${t}s`);
+  };
+
+  $("#btn-music-devocal").onclick = async () => {
+    if (!state.project.music) return toast("还没有配乐", true);
+    const keep_bass = $("#music-keepbass").checked;
+    try {
+      const job = await api(`/api/p/${state.name}/music/remove_vocals`, {
+        method: "POST", body: JSON.stringify({ keep_bass }),
+      });
+      toast("处理中…");
+      const done = await pollJob(job.id, (j) => toast(j.note || "处理中…"));
+      apply(await api(`/api/p/${state.name}`));
+      toast(`人声已去掉（${done.result.method}），不满意可以点还原`);
+    } catch (e) {
+      toast(e.message, true);
+    }
+  };
+
+  $("#btn-music-restore").onclick = async () => {
+    try {
+      apply(await api(`/api/p/${state.name}/music/restore`, { method: "POST" }));
+      toast("已还原成处理前那一版");
+    } catch (e) {
+      toast(e.message, true);
+    }
   };
 
   $("#btn-music-clear").onclick = async () => {
