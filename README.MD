@@ -18,20 +18,26 @@
 FluffyCut 把这套流程固化成一个本地工具：
 
 - 一列句子就是一条时间轴，改文字即改片子
+- 一句话里能切多个镜头，视频素材可以裁出入点出点、变速
+- 句与句之间可以加转场，但时间轴一帧都不动
 - 模板写死在配置里，每期只改内容不改排版
 - TTS 生成配音，字幕时间轴自动跟着音频走
+- 背景音乐一放，说话时自动压低
 - 一键渲染出 1080×1920 成品
 
-所有计算在本机完成，不上传素材，不依赖服务器。
+所有计算在本机完成，不上传素材，不依赖服务器。macOS 下可以打包成双击就用的 `.app`。
 
 ## 特性
 
 | | |
 |---|---|
 | **句子级编辑** | 时间轴以「一句台词 = 一个片段」为单位，不用拖拽 |
+| **镜头级剪辑** | 一句话内可切多个镜头；视频素材裁入出点、变速、素材不够长自动定格 |
+| **转场不动时间轴** | 转场吃的是上一句画面额外多渲的一截，加不加，字幕位置一帧不差 |
 | **节奏可视化** | 每句的时长条一眼看出哪里拖沓（经验值：1.5–3 秒/句） |
 | **模板化渲染** | 顶部标题带、底部品牌带、角色头像固定复用 |
-| **确定性输出** | 同一份 `project.json` 每次渲染逐帧一致 |
+| **背景音乐 + 闪避** | 有人说话就自动把音乐压下去，说完抬回来 |
+| **确定性输出** | 同一份 `project.json` 每次渲染逐字节一致 |
 | **AI 辅助（可选）** | 主题拆句、配图 prompt 生成 —— 只给建议，不自动执行 |
 | **纯本地** | ffmpeg + 系统 TTS，零服务器成本 |
 
@@ -40,9 +46,10 @@ FluffyCut 把这套流程固化成一个本地工具：
 - **渲染**：Python + ffmpeg（画面 cover/pad / Ken Burns 推近 / 图层 overlay），全程一次调用，不产中间视频
 - **字幕**：PIL 预渲图层烧录，另可导出 `.ass` 供二次剪辑
 - **模板层**：PIL 预渲带 alpha 的 PNG，中文排版比 `drawtext` 好控制
-- **界面**：FastAPI + 静态前端，浏览器打开 localhost
+- **界面**：FastAPI + 零依赖静态前端；桌面版用 pywebview 套一个原生窗口
 - **配音**：macOS 系统 `say`，可替换为任意 TTS API
 - **AI**：可插拔，自带 API key
+- **打包**：PyInstaller 打成 `FluffyCut.app`
 
 ## 环境要求
 
@@ -73,7 +80,22 @@ python -m core.render projects/demo/project.json     # 输出到 projects/demo/o
 # 启动编辑界面
 python -m server.main
 # 浏览器打开 http://localhost:8000
+
+# 或者直接开桌面版（原生窗口，端口自动挑）
+python app.py
 ```
+
+想要双击就能用的 `.app`：
+
+```bash
+pip install pyinstaller pywebview
+python packaging/build_app.py        # 产物在 dist/FluffyCut.app
+```
+
+打好的 `.app` 拖进「应用程序」即可。工程默认存在 `~/Movies/FluffyCut`，首次启动会把
+示例复制过去。它仍然需要系统里有 ffmpeg（`brew install ffmpeg`）；想把 ffmpeg 一起塞进包里，
+用 `FLUFFYCUT_BUNDLE_FFMPEG=1 python packaging/build_app.py`（注意 ffmpeg 是 GPL，
+随包分发要遵守它的许可）。未签名的 app 首次打开可能被 Gatekeeper 拦下，右键 →「打开」。
 
 想用 AI 面板就设一个 key（不设也不影响其他功能，面板会自动置灰）：
 
@@ -91,7 +113,10 @@ export ANTHROPIC_API_KEY=sk-ant-...
 | `python -m core.tts <工程> --stale` | 只补配音缺失或与台词不一致的句子 |
 | `python -m core.tts <工程> --list-voices` | 列出系统音色 |
 | `python -m core.subtitle <工程>` | 导出 `.ass` 字幕 |
-| `python -m server.main [--port 8000]` | 启动编辑界面 |
+| `python -m server.main [--port 8000]` | 启动编辑界面（浏览器） |
+| `python app.py [--browser]` | 桌面版；`--browser` 退回系统浏览器 |
+| `python scripts/make_demo_assets.py` | 重建示例工程缺的素材（都是程序生成的） |
+| `python packaging/build_app.py` | 打包成 `dist/FluffyCut.app` |
 | `python -m unittest discover -s tests` | 跑回归测试（不碰 ffmpeg，一秒跑完） |
 
 ## 编辑界面
@@ -100,8 +125,12 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 - 改文字就是改片子，时长条实时跟着变；轨道底纹标出 1.5–3 秒的甜区，条子超出去就是拖沓
 - 顶部一条节奏总览，整片哪里堆料一眼看得见
-- 每句可单独换配图、单独配音；台词改了而配音没重配，会挂「配音已过期」
-- 预览帧由服务端用渲染同一套代码合成，不是 CSS 模拟
+- 每句下面是**镜头条**：缩略图、各自占多久，加镜头 / 换素材 / 删镜头都在这儿；
+  选中的镜头是视频时，露出入点、出点、倍速三个数字
+- 两句之间是**接缝控件**：默认硬切，选个转场就能直接改时长
+- 每句可单独配音、单独调音量；台词改了而配音没重配，会挂「配音已过期」
+- 配乐面板管背景音乐：音量、淡入淡出、要不要闪避
+- 预览帧由服务端用渲染同一套代码合成，不是 CSS 模拟；切到哪个镜头就预览哪一格
 - 「通读」按顺序播配音 + 切帧，用来听节奏
 - 编辑防抖自动存盘，⌘S 立刻存；⌘↵ 在当前句下面插一句
 - AI 面板只给建议，点了「采用」才会写进 `project.json`
@@ -119,13 +148,23 @@ export ANTHROPIC_API_KEY=sk-ant-...
     "brand_text": "拒绝废话",
     "avatar": "assets/avatar.png"
   },
+  "music": { "path": "assets/bgm.m4a", "volume": 0.18, "duck": true },
   "clips": [
     {
       "id": "c1",
       "text": "冰雹一般出现在什么季节?",
       "visual": { "type": "image", "path": "assets/1.png" },
       "audio":  { "path": "assets/1.aiff", "duration": 2.4 },
-      "kenburns": true
+      "kenburns": true,
+      "transition": { "type": "fade", "duration": 0.35 }
+    },
+    {
+      "id": "c2",
+      "text": "错。冰雹的旺季是夏天。",
+      "visual": [
+        { "type": "video", "path": "assets/storm.mp4", "in": 12.5, "out": 14.0 },
+        { "type": "image", "path": "assets/hail.png", "seconds": 0.8 }
+      ]
     }
   ]
 }
@@ -138,21 +177,40 @@ export ANTHROPIC_API_KEY=sk-ant-...
 | `clips[].text` | 这一句的台词，同时也是字幕内容 |
 | `clips[].duration` | 显式时长（秒）。不写就用配音时长，再没有就按字数估（约 5.5 字/秒） |
 | `clips[].audio.duration` | 配音真实时长，由 TTS 回写 |
+| `clips[].audio.gain` | 这一句配音的音量倍数，默认 1.0 |
 | `clips[].audio.text_sha` | 合成时的台词指纹。台词改了对不上，界面就提示配音已过期 |
-| `clips[].visual.fit` | `cover`（裁切铺满，默认）或 `contain`（留边） |
-| `clips[].visual.prompt` | 配图 prompt，留档可复现，AI 生成的也写在这里 |
+| `clips[].visual` | 一个对象 = 一个镜头；写成数组就是这句话里连着切几个镜头 |
+| `clips[].visual[].type` | `image` / `video` / `color` |
+| `clips[].visual[].in` `out` | 视频素材的入点、出点（秒）。**这就是剪辑最核心的两个数字** |
+| `clips[].visual[].speed` | 变速，`2.0` = 两倍速。素材不够长就定格最后一帧，不会黑屏 |
+| `clips[].visual[].seconds` | 这个镜头在本句里占多久。不写的镜头平分剩下的时间 |
+| `clips[].visual[].fit` | `cover`（裁切铺满，默认）或 `contain`（留边） |
+| `clips[].visual[].prompt` | 配图 prompt，留档可复现，AI 生成的也写在这里 |
 | `clips[].kenburns` | `true` / `"in"` / `"out"`。`true` 时方向由 `id` 哈希决定，同一工程每次一致 |
+| `clips[].transition` | 到**下一句**的转场，`"fade"` 或 `{ "type": ..., "duration": ... }` |
+| `music` | 背景音乐：`volume` / `fade_in` / `fade_out` / `duck` / `start` |
 | `style.layout` | 覆盖模板布局的任意数值（字号、边距、字幕位置…），按画面高度自动等比缩放 |
 
 渲染器是 `project.json → mp4` 的纯函数。界面只是这个文件的编辑器，AI 只是往这个文件里写字段的工具之一。这条约束保证了每一层都能单独验证。
 
-同一份 `project.json` 渲两次，输出字节完全一致 —— 没有随机数，Ken Burns 的方向也来自 `id` 的哈希。
+### 时间轴的不变量
+
+**成片总长恒等于各句时长之和。** 转场和多镜头都不改变这一条：
+
+- 转场吃的是上一句画面**额外多渲的那一截**，不占时间轴，所以加不加转场，
+  每句字幕和配音的位置一帧都不会动；
+- 每句时长先吸附到整数帧再分给各镜头，音视频按同一个长度走。
+  30fps / 44100Hz 下一帧正好 1470 个采样，两条轨对得到采样级 ——
+  不这么做的话，画面按整帧裁、配音按秒裁，每句差半帧，几十句下来就是肉眼可见的不同步。
+
+同一份 `project.json` 渲两次，输出字节完全一致 —— 没有随机数，Ken Burns 的方向来自 `id` 的哈希，
+连音乐闪避这种带状态的滤镜也固定了帧长，把不确定性摁掉了。
 
 ## 项目结构
 
 ```
 core/                  渲染管线，纯函数，不依赖界面
-  project.py           project.json 的读写与校验，时间轴推导
+  project.py           project.json 的读写与校验，时间轴与分镜推导
   layers.py            模板层 / 字幕层 / 画面层的 PIL 合成（预览与成片共用）
   render.py            把工程翻译成一条 ffmpeg 命令并执行
   tts.py               配音与时长回写，引擎可替换
@@ -161,7 +219,12 @@ core/                  渲染管线，纯函数，不依赖界面
   placeholder.py       程序生成的占位配图（不下载任何第三方素材）
   fonts.py media.py    字体解析、ffmpeg 封装
 server/                FastAPI 后端 + 静态前端
+app.py                 桌面版入口：起服务 + 开原生窗口
+packaging/             PyInstaller 配置、图标生成、打包脚本
+scripts/               示例素材重建
 projects/<名字>/       一个片子一个目录：project.json + assets/
+  demo/                最朴素的六句话
+  edit-demo/           覆盖多镜头、入出点、变速、定格、转场、背景音乐
 tests/                 回归测试
 ```
 
@@ -173,10 +236,13 @@ tests/                 回归测试
 - [x] TTS 配音 + 时长回写
 - [x] LLM 主题拆句
 - [x] 配图 prompt 生成（全局风格前缀）
-- [ ] 转场与背景音乐
+- [x] 视频素材入出点、变速、一句多镜头
+- [x] 片段转场（不改变时间轴）
+- [x] 背景音乐 + 人声闪避
+- [x] 打包 `.app`（PyInstaller + pywebview）
 - [ ] 词级字幕高亮（whisper forced alignment）
 - [ ] 素材库搜索接入
-- [ ] Tauri 打包 `.app`
+- [ ] 波形视图与更细的音频剪辑
 
 ## 关于素材
 
