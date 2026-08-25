@@ -49,6 +49,14 @@
       <div class="tl-pop hidden" id="tl-pop"><i></i><b></b></div>
     </div>
     <div class="pace-strip" id="pace-strip" title="整片节奏：每段宽度 = 时长，颜色 = 快/合适/拖沓"></div>
+    <div class="focus-bar" id="focus-bar">
+      <button class="ghost" id="btn-prev" title="上一句（←）">←</button>
+      <span id="focus-pos">第 1 句 / 共 1</span>
+      <button class="ghost" id="btn-next" title="下一句（→）">→</button>
+      <span class="spacer"></span>
+      <span class="hint">时间轴划到哪儿，这里就是哪一句</span>
+      <button class="ghost" id="btn-viewmode" title="切换：只看当前句 / 全部列出">全部列出</button>
+    </div>
     <div id="clip-list"></div>
     <button class="add-clip" id="btn-add">＋ 新增一句<kbd>⌘↵</kbd></button>
   </section>

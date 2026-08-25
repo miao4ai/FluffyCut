@@ -23,6 +23,7 @@ const state = {
   caps: {},
   selected: 0,
   shot: 0,
+  viewMode: "focus",
   playhead: 0,
   pxPerSec: 60,
   compareOn: false,
@@ -86,6 +87,8 @@ async function open(name) {
   const params = new URLSearchParams(location.search);
   const wanted = +(params.get("clip") ?? 0);
   const wantNew = params.has("new");
+  const view = params.get("view");             // ?view=list / focus，方便分享与排查
+  if (view === "list" || view === "focus") state.viewMode = view;   // 要在 apply 之前设
 
 
   apply(await api(`/api/p/${name}`), name);
@@ -141,14 +144,47 @@ function paintCaps() {
   paintAIKey();
 }
 
+/* 两种看法：
+   focus —— 只显示时间指针所在的那一句。片子一长，把每句的素材、入出点、裁切全摊开
+            既看不过来也拖慢渲染；要看哪句就把指针挪过去。
+   list  —— 全部列出。通篇改台词、调顺序的时候这个更快。 */
 function paintList() {
   const list = $("#clip-list");
   const d = state.derived;
-  list.innerHTML = state.project.clips
-    .map((c, i) => clipRow(c, i, d?.clips?.[i]) + cutRow(i, d?.clips?.[i]))
-    .join("");
+  const clips = state.project.clips;
+  const focus = state.viewMode === "focus";
+
+  const rows = focus
+    ? (clips[state.selected]
+        ? clipRow(clips[state.selected], state.selected, d?.clips?.[state.selected])
+          + cutRow(state.selected, d?.clips?.[state.selected])
+        : "")
+    : clips.map((c, i) => clipRow(c, i, d?.clips?.[i]) + cutRow(i, d?.clips?.[i])).join("");
+
+  list.innerHTML = rows;
   list.querySelectorAll("textarea").forEach(grow);
+
+  $("#focus-pos").textContent = `第 ${state.selected + 1} 句 / 共 ${clips.length}`;
+  $("#btn-viewmode").textContent = focus ? "全部列出" : "只看当前句";
+  $("#focus-bar").classList.toggle("dim", !focus);
   markSelected();
+}
+
+function setViewMode(mode) {
+  state.viewMode = mode;
+  try {
+    localStorage.setItem("fluffycut.view", mode);
+  } catch { /* 隐私模式下写不了，无所谓 */ }
+  paintList();
+  paintDerived();
+}
+
+/* 上一句 / 下一句：把指针也带过去，预览和时间轴跟着动 */
+function step(delta) {
+  const i = Math.max(0, Math.min(state.project.clips.length - 1, state.selected + delta));
+  select(i, 0);
+  const dc = state.derived?.clips?.[i];
+  if (dc) scrub(dc.start + 0.02);
 }
 
 function clipRow(c, i, dc) {
@@ -370,8 +406,8 @@ function select(i, shot = 0) {
   const changed = state.selected !== i || state.shot !== shot;
   state.selected = Math.max(0, Math.min(i, state.project.clips.length - 1));
   state.shot = shot;
-  if (changed) {
-    paintList();                 // 镜头条和入出点行都跟着选中状态走
+  if (changed || state.viewMode === "focus") {
+    paintList();                 // 聚焦模式下换的是"显示哪一句"，必须重画
     paintDerived();              // 重建 DOM 后要把时长条重新画上
   }
   markSelected();
@@ -817,6 +853,12 @@ function bind() {
 
   bindMusic();
   bindTimeline();
+  try {
+    state.viewMode = localStorage.getItem("fluffycut.view") || "focus";
+  } catch { /* ignore */ }
+  $("#btn-prev").onclick = () => step(-1);
+  $("#btn-next").onclick = () => step(1);
+  $("#btn-viewmode").onclick = () => setViewMode(state.viewMode === "focus" ? "list" : "focus");
   $("#btn-learn").onclick = learnFromVideo;
   $("#project-select").onchange = (e) => open(e.target.value);
 
@@ -839,6 +881,11 @@ function bind() {
 
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !$("#modal").classList.contains("hidden")) return closeNewDialog();
+    const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "");
+    if (!typing && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+      e.preventDefault();
+      return step(e.key === "ArrowRight" ? 1 : -1);
+    }
     if ((e.metaKey || e.ctrlKey) && e.key === "s") {
       e.preventDefault();
       save();
