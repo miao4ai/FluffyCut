@@ -16,9 +16,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import settings
 from .project import Project
 
-MODEL = os.environ.get("FLUFFYCUT_MODEL", "claude-opus-5")
+DEFAULT_MODEL = "claude-opus-5"
 MAX_TOKENS = 8000
 
 SYSTEM = """你是短视频脚本编辑，服务于一个叫「拒绝废话」的知识类竖屏短视频账号。
@@ -44,21 +45,37 @@ class Suggestion:
     raw: dict[str, Any]
 
 
-def available() -> tuple[bool, str]:
-    """(能不能用, 原因)。界面据此决定 AI 面板是灰的还是亮的。
+def model() -> str:
+    """用哪个模型：环境变量 > 本机配置 > 默认。"""
+    return os.environ.get("FLUFFYCUT_MODEL") or settings.get("model") or DEFAULT_MODEL
 
-    凭据的解析顺序由 SDK 负责，这里只是探一下有没有可用来源：
-    环境变量，或 `ant auth login` 落在 ~/.config/anthropic/ 的 profile。
+
+def credential() -> tuple[str | None, str]:
+    """(key, 来源说明)。key 为 None 表示交给 SDK 自己解析或者根本没有。
+
+    顺序：环境变量 > 界面上填的（~/.config/fluffycut/config.json）> `ant auth login` 的 profile。
+    双击启动的 .app 读不到环境变量，中间那条就是为它准备的。
     """
+    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+        return None, "环境变量"
+    stored = settings.get("anthropic_api_key")
+    if stored:
+        return stored, "本机配置"
+    if (Path.home() / ".config" / "anthropic").is_dir():
+        return None, "ant 登录态"
+    return None, ""
+
+
+def available() -> tuple[bool, str]:
+    """(能不能用, 原因)。界面据此决定 AI 面板是灰的还是亮的。"""
     try:
         import anthropic  # noqa: F401
     except ImportError:
         return False, "没装 anthropic 包：pip install anthropic"
-    has_env = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
-    has_profile = (Path.home() / ".config" / "anthropic").is_dir()
-    if not (has_env or has_profile):
-        return False, "没有 ANTHROPIC_API_KEY，AI 功能已关闭（其余功能不受影响）"
-    return True, MODEL
+    _key, source = credential()
+    if not source:
+        return False, "还没填 API key，AI 功能已关闭（其余功能不受影响）"
+    return True, model()
 
 
 def _client():
@@ -67,7 +84,8 @@ def _client():
         raise AIError(why)
     import anthropic
 
-    return anthropic.Anthropic()
+    key, _source = credential()
+    return anthropic.Anthropic(api_key=key) if key else anthropic.Anthropic()
 
 
 def _ask(prompt: str, schema: dict[str, Any], effort: str = "medium") -> dict[str, Any]:
@@ -77,7 +95,7 @@ def _ask(prompt: str, schema: dict[str, Any], effort: str = "medium") -> dict[st
 
     try:
         resp = client.messages.create(
-            model=MODEL,
+            model=model(),
             max_tokens=MAX_TOKENS,
             system=SYSTEM,
             messages=[{"role": "user", "content": prompt}],

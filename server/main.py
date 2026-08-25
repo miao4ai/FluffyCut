@@ -26,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from core import ai, layers, media, placeholder, render, subtitle, tts
 from core import analyze
 from core import project as project_module
+from core import settings
 from core.project import Clip, Project, ProjectError, Visual, blank
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -136,6 +137,9 @@ def view(project: Project, name: str) -> dict[str, Any]:
             "ai": ai_ok,
             "ai_note": ai_why,
             "transcriber": analyze.transcriber_name(),
+            "ai_source": ai.credential()[1],
+            "ai_key_masked": settings.mask(settings.get("anthropic_api_key")),
+            "ai_model": ai.model(),
         },
     }
 
@@ -410,6 +414,33 @@ def start_render(name: str, payload: dict = Body(default={})) -> dict[str, Any]:
 
     threading.Thread(target=work, daemon=True).start()
     return job.as_dict()
+
+
+@app.get("/api/settings")
+def read_settings() -> dict[str, Any]:
+    """本机配置。只回掩码后的 key，原文不出这台机器的进程。"""
+    _key, source = ai.credential()
+    return {
+        "ai_source": source,
+        "ai_key_masked": settings.mask(settings.get("anthropic_api_key")),
+        "ai_model": ai.model(),
+        "config_file": str(settings.config_file()),
+        "env_override": bool(os.environ.get("ANTHROPIC_API_KEY")
+                             or os.environ.get("ANTHROPIC_AUTH_TOKEN")),
+    }
+
+
+@app.post("/api/settings")
+def write_settings(payload: dict = Body(default={})) -> dict[str, Any]:
+    """存 API key（或清掉）。存在 ~/.config/fluffycut/config.json，权限 0600。"""
+    if "api_key" in payload:
+        key = str(payload.get("api_key") or "").strip()
+        if key and len(key) < 12:
+            raise HTTPException(400, "这不像一个 API key")
+        settings.put("anthropic_api_key", key or None)
+    if "model" in payload:
+        settings.put("model", str(payload.get("model") or "").strip() or None)
+    return read_settings()
 
 
 @app.post("/api/analyze")

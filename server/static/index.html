@@ -12,8 +12,8 @@
   <div class="brand">FluffyCut<span>Cut the fluff.</span></div>
 
   <select id="project-select" title="切换工程"></select>
-  <button class="ghost" id="btn-new" title="新建工程">＋</button>
-  <button class="ghost" id="btn-learn" title="读入一个参考片，扒它的节奏">学</button>
+  <button class="ghost accent" id="btn-new" title="开始做一条新片子">＋ 新片子</button>
+  <button class="ghost" id="btn-learn" title="读入一个参考片，扒它的节奏">学参考片</button>
 
   <input id="title" class="title-input" placeholder="视频标题（会显示在顶部标题带）">
 
@@ -51,6 +51,14 @@
 
     <details class="panel" open>
       <summary><span>AI 助手</span><span class="hint" id="ai-note"></span></summary>
+      <div class="panel-body" id="ai-key-box">
+        <label>Anthropic API key</label>
+        <div class="row">
+          <input id="ai-key" type="password" placeholder="粘贴 sk-ant-…" autocomplete="off" spellcheck="false">
+          <button class="ghost" id="btn-ai-key-save">保存</button>
+        </div>
+        <p class="hint" id="ai-key-hint"></p>
+      </div>
       <div class="panel-body" id="ai-body">
         <label>主题 / 草稿</label>
         <textarea id="ai-topic" rows="3" placeholder="例：冰雹为什么夏天多？"></textarea>
@@ -138,6 +146,23 @@
     </details>
   </aside>
 </main>
+
+<div id="modal" class="modal hidden">
+  <div class="modal-card">
+    <h2>开始一条新片子</h2>
+    <label>标题<span class="hint">会显示在成片顶部的标题带上</span></label>
+    <input id="new-title" placeholder="例：没文化到底有多可怕?" autocomplete="off">
+    <label>目录名<span class="hint">工程存在哪个文件夹，可以不改</span></label>
+    <input id="new-name" placeholder="自动根据标题生成" autocomplete="off">
+    <label>品牌带<span class="hint">底部那条小字，留空就不显示</span></label>
+    <input id="new-brand" placeholder="例：拒绝废话" autocomplete="off">
+    <div class="modal-actions">
+      <button class="ghost" id="btn-new-cancel">取消</button>
+      <button class="ghost" id="btn-new-learn">从参考片开始</button>
+      <button class="primary" id="btn-new-create">空白开始</button>
+    </div>
+  </div>
+</div>
 
 <div id="toast" class="toast hidden"></div>
 <script src="./app.js"></script>

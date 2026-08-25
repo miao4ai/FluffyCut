@@ -79,10 +79,15 @@ async function loadProjects() {
 }
 
 async function open(name) {
-  const wanted = +(new URLSearchParams(location.search).get("clip") ?? 0);
+  // 参数要在 replaceState 改写 URL **之前**读完，否则下面全读不到了
+  const params = new URLSearchParams(location.search);
+  const wanted = +(params.get("clip") ?? 0);
+  const wantNew = params.has("new");
+
   apply(await api(`/api/p/${name}`), name);
   history.replaceState(null, "", `?p=${name}`);
   if (wanted > 0) select(wanted);          // ?clip=2 直接定位到第 3 句，方便分享/排查
+  if (wantNew) openNewDialog();
 }
 
 function apply(data, name = state.name) {
@@ -109,12 +114,17 @@ function paintAll() {
   paintMusic();
   paintReference();
 
+  paintCaps();
+}
+
+function paintCaps() {
   const c = state.caps;
   $("#caps-note").textContent =
     `ffmpeg ${c.ffmpeg ? "✓" : "✗"} · 系统 TTS ${c.tts ? "✓" : "✗"} · AI ${c.ai ? "✓" : "✗"}` +
     (c.libass ? " · libass ✓" : " · 无 libass（字幕走 PIL 图层，不影响成片）");
-  $("#ai-note").textContent = c.ai ? "" : c.ai_note || "";
+  $("#ai-note").textContent = c.ai ? `${c.ai_source} · ${c.ai_model}` : c.ai_note || "";
   $("#ai-body").classList.toggle("off", !c.ai);
+  paintAIKey();
 }
 
 function paintList() {
@@ -768,23 +778,25 @@ function bind() {
   $("#btn-learn").onclick = learnFromVideo;
   $("#project-select").onchange = (e) => open(e.target.value);
 
-  $("#btn-new").onclick = async () => {
-    const name = prompt("新工程名（英文/数字，会作为目录名）");
-    if (!name) return;
-    try {
-      const data = await api("/api/projects", {
-        method: "POST",
-        body: JSON.stringify({ name, title: "", brand: state.project?.style?.brand_text || "" }),
-      });
-      await loadProjects();
-      $("#project-select").value = name;
-      apply(data, name);
-    } catch (e) {
-      toast(e.message, true);
-    }
+  $("#btn-new").onclick = openNewDialog;
+  $("#btn-new-cancel").onclick = closeNewDialog;
+  $("#btn-new-create").onclick = createProject;
+  $("#btn-new-learn").onclick = () => {
+    closeNewDialog();
+    learnFromVideo();
   };
+  $("#btn-ai-key-save").onclick = saveAIKey;
+  $("#ai-key").addEventListener("keydown", (e) => e.key === "Enter" && saveAIKey());
+  // 标题跟着生成目录名，除非人自己改过
+  $("#new-title").addEventListener("input", (e) => {
+    const nameEl = $("#new-name");
+    if (!nameEl.dataset.touched) nameEl.value = slug(e.target.value);
+  });
+  $("#new-name").addEventListener("input", (e) => (e.target.dataset.touched = "1"));
+  $("#modal").addEventListener("click", (e) => e.target.id === "modal" && closeNewDialog());
 
   document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !$("#modal").classList.contains("hidden")) return closeNewDialog();
     if ((e.metaKey || e.ctrlKey) && e.key === "s") {
       e.preventDefault();
       save();
@@ -794,6 +806,77 @@ function bind() {
   window.addEventListener("beforeunload", (e) => {
     if ($("#save-state").classList.contains("dirty")) e.preventDefault();
   });
+}
+
+/* ---------------------------------------------------------------- 新建工程 */
+
+/* 目录名：中文原样留着（文件系统认得），只把空白和标点换成短横 */
+const slug = (s) =>
+  (s || "").trim().replace(/[^\w\u4e00-\u9fff]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+
+function openNewDialog() {
+  $("#modal").classList.remove("hidden");
+  $("#new-title").value = "";
+  $("#new-name").value = "";
+  $("#new-name").dataset.touched = "";
+  $("#new-brand").value = state.project?.style?.brand_text || "";
+  setTimeout(() => $("#new-title").focus(), 30);
+}
+
+function closeNewDialog() {
+  $("#modal").classList.add("hidden");
+}
+
+async function createProject() {
+  const title = $("#new-title").value.trim();
+  const name = slug($("#new-name").value || title) || `片子-${Date.now().toString(36).slice(-4)}`;
+  try {
+    const data = await api("/api/projects", {
+      method: "POST",
+      body: JSON.stringify({ name, title, brand: $("#new-brand").value.trim() }),
+    });
+    closeNewDialog();
+    await loadProjects();
+    $("#project-select").value = name;
+    apply(data, name);
+    history.replaceState(null, "", `?p=${name}`);
+    select(0);
+    toast("新片子建好了，先把第一句写上");
+    setTimeout(() => document.querySelector(".clip textarea")?.focus(), 60);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+/* ---------------------------------------------------------------- AI 凭据 */
+
+/* 双击启动的 .app 读不到 shell 里 export 的环境变量，所以 key 得能在界面上填。
+   原文只往服务端走一次，回来的永远是掩码。 */
+function paintAIKey() {
+  const c = state.caps || {};
+  const box = $("#ai-key-box");
+  const fromEnv = c.ai_source === "环境变量" || c.ai_source === "ant 登录态";
+  box.classList.toggle("hidden", fromEnv);
+  $("#ai-key").value = "";
+  $("#ai-key").placeholder = c.ai_key_masked ? `已保存 ${c.ai_key_masked}` : "粘贴 sk-ant-…";
+  $("#ai-key-hint").textContent = fromEnv
+    ? `凭据来自${c.ai_source}，界面上不用填`
+    : c.ai_key_masked
+      ? "存在 ~/.config/fluffycut/config.json（明文，权限 600）。留空保存即清除。"
+      : "去 console.anthropic.com 拿一个，粘进来即可。存在本机，不会进工程文件。";
+}
+
+async function saveAIKey() {
+  const key = $("#ai-key").value.trim();
+  try {
+    await api("/api/settings", { method: "POST", body: JSON.stringify({ api_key: key }) });
+    const data = await api(`/api/p/${state.name}`);
+    state.caps = data.caps;
+    paintCaps();
+    toast(key ? "key 已保存" : "key 已清除");
+  } catch (e) {
+    toast(e.message, true);
+  }
 }
 
 /* ---------------------------------------------------------------- 参考片 */

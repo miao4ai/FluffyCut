@@ -99,11 +99,25 @@ python packaging/build_app.py        # 产物在 dist/FluffyCut.app
 用 `FLUFFYCUT_BUNDLE_FFMPEG=1 python packaging/build_app.py`（注意 ffmpeg 是 GPL，
 随包分发要遵守它的许可）。未签名的 app 首次打开可能被 Gatekeeper 拦下，右键 →「打开」。
 
-想用 AI 面板就设一个 key（不设也不影响其他功能，面板会自动置灰）：
+### AI 的 key 填在哪
 
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-```
+不填也不影响其他功能，AI 面板会自动置灰。要用就三选一，优先级从高到低：
+
+1. **界面上填** —— 右侧「AI 助手」面板里有个输入框，粘进去点保存。
+   存在 `~/.config/fluffycut/config.json`（明文，权限 600），下次自动读。
+   **桌面版只有这条路能走**：双击启动的 `.app` 不经过 shell，`.zshrc` 里 export 的
+   环境变量它一个字都看不到 —— 和 ffmpeg 找不到是同一类问题。
+2. **环境变量** —— 从源码跑的时候方便：
+
+   ```bash
+   export ANTHROPIC_API_KEY=sk-ant-...
+   ```
+
+3. **`ant auth login`** 落在 `~/.config/anthropic/` 的 profile，SDK 会自己认。
+
+key 永远不会写进 `project.json` —— 那个文件是要进 git 的。界面上也只显示掩码
+（`sk-ant-…7f3a`），原文不回传浏览器。想换模型：`export FLUFFYCUT_MODEL=claude-sonnet-5`，
+或者往上面那个 config.json 里写 `"model"`。
 
 ## 命令行
 
@@ -138,7 +152,8 @@ export ANTHROPIC_API_KEY=sk-ant-...
   **选文件时给个视频也行** —— 参考片的配乐常常就藏在视频里，后端自动把音轨抽出来
 - 预览帧由服务端用渲染同一套代码合成，不是 CSS 模拟；切到哪个镜头就预览哪一格
 - 「通读」按顺序播配音 + 切帧，用来听节奏
-- 编辑防抖自动存盘，⌘S 立刻存；⌘↵ 在当前句下面插一句
+- 「＋ 新片子」开一条新的：填标题就自动生成目录名，也可以直接「从参考片开始」
+- 编辑防抖自动存盘，⌘S 立刻存；⌘↵ 在当前句下面插一句；Esc 关掉对话框
 - AI 面板只给建议，点了「采用」才会写进 `project.json`
 
 ## 学习一个参考片
@@ -265,6 +280,7 @@ core/                  渲染管线，纯函数，不依赖界面
   ai.py                拆句 / 配图 prompt / 标题，可插拔
   analyze.py           拆解参考片：切点、语音段、转写、同节奏骨架
   placeholder.py       程序生成的占位配图（不下载任何第三方素材）
+  settings.py          本机配置（AI key 等），不进工程文件
   fonts.py media.py    字体解析、ffmpeg 封装
 server/                FastAPI 后端 + 静态前端
 app.py                 桌面版入口：起服务 + 开原生窗口

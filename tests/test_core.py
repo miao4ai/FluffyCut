@@ -3,10 +3,11 @@
 只测纯逻辑（不跑 ffmpeg），一秒内跑完。
 """
 
+import os
 import unittest
 from pathlib import Path
 
-from core import analyze, fonts, layers, subtitle
+from core import ai, analyze, fonts, layers, settings, subtitle
 from core.project import Clip, Project, ProjectError, estimate_duration
 from core.render import RenderOptions, build_command
 from core.tts import is_stale, text_sha
@@ -403,3 +404,63 @@ class TestAnalyze(unittest.TestCase):
         self.assertEqual(report.cuts_per_minute, 3.0)
         self.assertEqual(report.speech_ratio, 0.1)
         self.assertEqual(report.chars_per_second, 2.0)         # 12 字 / 6 秒
+
+
+class TestSettings(unittest.TestCase):
+    """本机配置：AI key 得有地方存，因为双击启动的 .app 读不到环境变量。"""
+
+    def setUp(self):
+        import tempfile
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.old = os.environ.get("FLUFFYCUT_CONFIG_DIR")
+        os.environ["FLUFFYCUT_CONFIG_DIR"] = self.tmp.name
+
+    def tearDown(self):
+        if self.old is None:
+            os.environ.pop("FLUFFYCUT_CONFIG_DIR", None)
+        else:
+            os.environ["FLUFFYCUT_CONFIG_DIR"] = self.old
+        self.tmp.cleanup()
+
+    def test_roundtrip(self):
+        settings.put("anthropic_api_key", "sk-ant-api03-secret-7f3a")
+        self.assertEqual(settings.get("anthropic_api_key"), "sk-ant-api03-secret-7f3a")
+
+    def test_file_is_owner_only(self):
+        """明文存的，至少别让同机器的其他用户读到。"""
+        path = settings.put("anthropic_api_key", "sk-ant-api03-secret-7f3a")
+        self.assertEqual(path.stat().st_mode & 0o077, 0)
+
+    def test_empty_value_clears(self):
+        settings.put("anthropic_api_key", "sk-ant-api03-secret-7f3a")
+        settings.put("anthropic_api_key", "")
+        self.assertIsNone(settings.get("anthropic_api_key"))
+
+    def test_missing_or_broken_file_is_not_fatal(self):
+        self.assertEqual(settings.load(), {})
+        settings.config_file().parent.mkdir(parents=True, exist_ok=True)
+        settings.config_file().write_text("{ 不是 json", "utf-8")
+        self.assertEqual(settings.load(), {})
+
+    def test_mask_never_shows_the_middle(self):
+        masked = settings.mask("sk-ant-api03-abcdefghijklmnop7f3a")
+        self.assertEqual(masked, "sk-ant-…7f3a")
+        self.assertNotIn("abcdefgh", masked)
+
+    def test_credential_prefers_env_over_stored(self):
+        settings.put("anthropic_api_key", "sk-ant-stored")
+        os.environ["ANTHROPIC_API_KEY"] = "sk-ant-from-env"
+        try:
+            key, source = ai.credential()
+            self.assertIsNone(key)          # 交给 SDK 自己读环境变量
+            self.assertEqual(source, "环境变量")
+        finally:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+
+    def test_credential_falls_back_to_stored_key(self):
+        settings.put("anthropic_api_key", "sk-ant-stored")
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+        key, source = ai.credential()
+        self.assertEqual(key, "sk-ant-stored")
+        self.assertEqual(source, "本机配置")
