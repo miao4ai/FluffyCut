@@ -26,6 +26,7 @@ const state = {
   viewMode: "focus",
   playhead: 0,
   frameT: null,
+  frameClipT: null,
   refPlayhead: 0,
   refSelected: 0,
   pxPerSec: 60,
@@ -201,6 +202,7 @@ function clipRow(c, i, dc) {
           <button class="shot add" data-act="shot-add" title="在这句里再加一个镜头">＋镜头</button>
         </div>
         ${trimRow(c, i, dc)}
+        ${overlayEditor(c, i)}
         ${c.note ? `<div class="note">${escapeHtml(c.note)}</div>` : ""}
         <div class="clip-meta">
           <span class="dur-bar" data-bar><i></i></span>
@@ -310,6 +312,73 @@ function trimRow(c, i, dc) {
                  value="${Math.round((sh.crop?.[k] || 0) * 100) || ""}" placeholder="0"></label>`).join("")}
       <span class="hint">原片自带的字幕是像素，改不了，只能裁掉</span>
     </div>`}`;
+}
+
+/* 贴在画面上的字：标题、注解、花字。
+   和整句字幕（clips[].text）不是一回事 —— 这里可以指定出现在句内哪几秒、贴在哪个位置。 */
+function overlayEditor(c, i) {
+  if (state.selected !== i) return "";
+  const at = state.frameClipT;
+  const rows = (c.overlays || []).map((o, oi) => `
+    <div class="ov-row" data-oi="${oi}">
+      <input class="ov-text" data-act="ov-text" value="${escapeHtml(o.text || "")}" placeholder="要贴的字">
+      <label>起<input type="number" step="0.1" min="0" data-act="ov-start" value="${o.start ?? 0}"></label>
+      <label>止<input type="number" step="0.1" min="0" data-act="ov-end" value="${o.end ?? ""}" placeholder="到句尾"></label>
+      <label>X<input type="number" step="0.05" min="0" max="1" data-act="ov-x" value="${o.x ?? 0.5}"></label>
+      <label>Y<input type="number" step="0.05" min="0" max="1" data-act="ov-y" value="${o.y ?? 0.25}"></label>
+      <label>字号<input type="number" step="4" min="8" max="300" data-act="ov-size" value="${o.size ?? 56}"></label>
+      <input type="color" data-act="ov-color" value="${o.color || "#FFFFFF"}" title="字色">
+      <button class="ghost" data-act="ov-del" title="删掉这段字">✕</button>
+    </div>`).join("");
+  return `
+    <div class="overlays">
+      <div class="ov-head">
+        <span class="lab">贴字</span>
+        <span class="hint">${(c.overlays || []).length ? "" : "整句字幕在上面那行改；这里是往画面上钉字"}</span>
+        <span class="spacer"></span>
+        <button class="ghost" data-act="ov-add">＋ 在 ${(at ?? 0).toFixed(2)}s 加一段</button>
+      </div>
+      ${rows}
+    </div>`;
+}
+
+function overlaysOf(c) {
+  if (!Array.isArray(c.overlays)) c.overlays = [];
+  return c.overlays;
+}
+
+async function addOverlay(i) {
+  const c = state.project.clips[i];
+  const at = Math.max(0, state.frameClipT ?? 0);
+  overlaysOf(c).push({ text: "新的一段字", start: round3(at), y: 0.25, size: 56 });
+  await save();
+  paintList();
+  paintDerived();
+  // 光标直接落到新那行，省得再点一下
+  const rows = document.querySelectorAll(".ov-row .ov-text");
+  rows[rows.length - 1]?.select();
+}
+
+function setOverlayField(i, oi, key, raw) {
+  const o = overlaysOf(state.project.clips[i])[oi];
+  if (!o) return;
+  if (key === "text" || key === "color") {
+    o[key] = raw;
+  } else if (raw === "") {
+    delete o[key];
+  } else {
+    const n = Number(raw);
+    if (Number.isNaN(n)) return;
+    o[key] = n;
+  }
+  markDirty();
+}
+
+async function delOverlay(i, oi) {
+  overlaysOf(state.project.clips[i]).splice(oi, 1);
+  await save();
+  paintList();
+  paintDerived();
 }
 
 /* 两句之间的接缝：默认硬切，选了转场就在这里改时长 */
@@ -582,9 +651,10 @@ function pickFrame(t) {
   const dc = state.derived?.clips?.[state.selected];
   const sh = dc?.shots?.[state.shot];
   if (dc && sh) {
-    // 素材时间换算回全片时间
-    const local = sh.start + (t - (sh.src_in || 0)) / (sh.speed || 1);
-    scrub(TRACKS.edit, dc.start + Math.max(0, local));
+    // 素材时间换算回句内时间，再换算回全片时间
+    const local = Math.max(0, sh.start + (t - (sh.src_in || 0)) / (sh.speed || 1));
+    state.frameClipT = local;        // 贴字默认就从这一帧开始
+    scrub(TRACKS.edit, dc.start + local);
   }
 }
 
@@ -881,6 +951,8 @@ function bind() {
       case "frame-in":     return frameEdge(i, "in");
       case "frame-out":    return frameEdge(i, "out");
       case "frame-split":  return splitAtFrame(i);
+      case "ov-add":       return addOverlay(i);
+      case "ov-del":       return delOverlay(i, +btn.closest(".ov-row").dataset.oi);
       default:             return clipAction(i, btn.dataset.act);
     }
   });
@@ -893,7 +965,11 @@ function bind() {
     const i = +row.dataset.i;
     const key = { "src-in": "in", "src-out": "out", speed: "speed", "shot-seconds": "seconds" }[act];
     if (key) return setShotField(i, state.shot, key, e.target.value);
-    if (act?.startsWith("crop-")) setShotCrop(i, state.shot, act.slice(5), e.target.value);
+    if (act?.startsWith("crop-")) return setShotCrop(i, state.shot, act.slice(5), e.target.value);
+    if (act?.startsWith("ov-")) {
+      const row = e.target.closest(".ov-row");
+      if (row) setOverlayField(i, +row.dataset.oi, act.slice(3), e.target.value);
+    }
   });
 
   // 转场：选类型 / 改时长

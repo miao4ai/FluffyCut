@@ -500,3 +500,50 @@ class TestCrop(unittest.TestCase):
         graph = cmd[cmd.index("-filter_complex") + 1]
         self.assertIn("crop=w=iw*1.0000:h=ih*0.8000:x=iw*0.0000:y=ih*0.0000", graph)
         self.assertLess(graph.index("crop=w=iw*1.0000"), graph.index("scale=w="))
+
+
+class TestOverlays(unittest.TestCase):
+    """贴在画面上的字：和整句字幕不是一回事，有自己的时间窗和位置。"""
+
+    def _clip(self, overlays, duration=4.0):
+        return Clip.from_dict({"id": "c1", "duration": duration, "overlays": overlays}, 0)
+
+    def test_empty_text_is_dropped(self):
+        c = self._clip([{"text": "  "}, {"text": "留下"}])
+        self.assertEqual([o.text for o in c.overlays], ["留下"])
+
+    def test_window_defaults_to_the_whole_clip(self):
+        p = Project.from_dict({"clips": [{"id": "c1", "duration": 4.0,
+                                          "overlays": [{"text": "x"}]}]})
+        self.assertEqual(p.clips[0].overlays[0].window(p.seconds_of(p.clips[0])), (0.0, 4.0))
+
+    def test_window_is_clamped_to_the_clip(self):
+        c = self._clip([{"text": "x", "start": 1.0, "end": 99.0}])
+        self.assertEqual(c.overlays[0].window(4.0), (1.0, 4.0))
+
+    def test_end_before_start_is_rejected(self):
+        with self.assertRaises(ProjectError):
+            self._clip([{"text": "x", "start": 3.0, "end": 1.0}])
+
+    def test_position_and_size_are_clamped(self):
+        o = self._clip([{"text": "x", "x": 5, "y": -1, "size": 9999}]).overlays[0]
+        self.assertEqual((o.x, o.y, o.size), (1.0, 0.0, 300))
+
+    def test_only_changed_fields_are_written_back(self):
+        d = self._clip([{"text": "x", "y": 0.5}]).to_dict()["overlays"][0]
+        self.assertEqual(d, {"text": "x", "y": 0.5})
+
+    def test_render_gives_each_overlay_its_own_time_window(self):
+        import tempfile
+
+        p = Project.from_dict({"clips": [
+            {"id": "a", "duration": 4.0, "overlays": [
+                {"text": "标题", "start": 1.0, "end": 3.0},
+                {"text": "注解", "start": 2.0},
+            ]},
+        ]}, DEMO)
+        with tempfile.TemporaryDirectory() as tmp:
+            cmd = build_command(p, Path(tmp) / "o.mp4", Path(tmp), RenderOptions())
+        graph = cmd[cmd.index("-filter_complex") + 1]
+        self.assertIn("enable='between(t,1.000,3.000)'", graph)
+        self.assertIn("enable='between(t,2.000,4.000)'", graph)   # 不写终点就到句尾

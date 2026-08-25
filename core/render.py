@@ -174,9 +174,23 @@ def build_command(project: Project, out: Path, workdir: Path, opts: RenderOption
         enable = f":enable='lt(t,{project.seconds_of(clip):.3f})'" if tail else ""
         # settb 统一时基：xfade 要求两路输入时基一致，各分支经过的滤镜不同会跑偏
         filters.append(
-            f"{pic}[{s}:v]overlay=0:0:format=auto:shortest=1{enable},settb=1/{FPS}[v{ci}]"
+            f"{pic}[{s}:v]overlay=0:0:format=auto:shortest=1{enable},settb=1/{FPS}[sub{ci}]"
         )
-        seg_labels.append(f"[v{ci}]")
+
+        # 贴字：一段一张 PNG，各自只在自己的时间窗里出现
+        cur = f"[sub{ci}]"
+        for oi, ov in enumerate(clip.overlays):
+            png = workdir / f"ov_{ci}_{oi}.png"
+            layers.render_overlay(project, ov).save(png)
+            a, b = ov.window(project.seconds_of(clip))
+            o = add_input(["-loop", "1", "-framerate", FPS, "-i", png])
+            nxt = f"[ov{ci}_{oi}]"
+            filters.append(
+                f"{cur}[{o}:v]overlay=0:0:format=auto:shortest=1"
+                f":enable='between(t,{a:.3f},{b:.3f})'{nxt}"
+            )
+            cur = nxt
+        seg_labels.append(cur)
 
     filters.append(_video_chain(project, seg_labels))
 

@@ -288,6 +288,40 @@ def render_subtitle(project: Project, text: str) -> Image.Image:
     return img
 
 
+def render_overlay(project: Project, ov) -> Image.Image:
+    """一段贴字 -> 一张全画幅透明 PNG。和字幕层同一套排版代码。"""
+    video = project.video
+    W, H = video.width, video.height
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    if not (ov.text or "").strip():
+        return img
+    draw = ImageDraw.Draw(img)
+
+    scale = W / 1080                    # 字号按 1080 宽设计，其他分辨率等比缩放
+    font = fonts.load(project.style.font, max(8, int(ov.size * scale)))
+    pad = int(18 * scale)
+    max_w = int(W * 0.9) - pad * 2
+    lines = wrap(ov.text, font, max_w, max_lines=4)
+    lh = _line_height(font, 1.25)
+    text_h = lh * len(lines)
+    box_w = max(measure(font, ln) for ln in lines) + pad * 2
+    box_h = text_h + int(pad * 1.1)
+
+    cx, cy = int(W * ov.x), int(H * ov.y)
+    x0 = max(0, min(W - box_w, cx - box_w // 2))
+    y0 = max(0, min(H - box_h, cy - box_h // 2))
+
+    bg = parse_color(ov.bg, (0, 0, 0, 0))
+    if bg[3]:
+        draw.rounded_rectangle((x0, y0, x0 + box_w, y0 + box_h),
+                               radius=int(14 * scale), fill=bg)
+    _draw_lines(draw, lines, font, x0 + box_w // 2, y0 + int(pad * 0.55),
+                fill=parse_color(ov.color, (255, 255, 255, 255)), gap=1.25,
+                stroke_width=max(1, int(5 * scale)),
+                stroke_fill=parse_color(ov.stroke, (0, 0, 0, 255)))
+    return img
+
+
 # ---------------------------------------------------------------- 画面层
 
 
@@ -418,4 +452,10 @@ def compose_frame(project: Project, clip: Clip, t: float = 0.0,
     frame = render_visual(project, clip, t)
     frame.alpha_composite(template if template is not None else render_template(project))
     frame.alpha_composite(render_subtitle(project, clip.text))
+    # 只画此刻该出现的那几段贴字
+    seconds = project.seconds_of(clip)
+    for ov in clip.overlays:
+        a, b = ov.window(seconds)
+        if a <= t < b:
+            frame.alpha_composite(render_overlay(project, ov))
     return frame.convert("RGB")

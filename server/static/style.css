@@ -476,3 +476,22 @@ main { flex: 1; display: flex; min-height: 0; }
 .frames-act .lab { font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums; }
 .frames-act button { padding: 2px 9px; font-size: 12px; }
 .frames-act button[disabled] { opacity: .4; pointer-events: none; }
+
+/* ---------- 贴字编辑器 ---------- */
+
+.overlays {
+  margin-top: 8px; padding: 8px 9px;
+  background: #101218; border: 1px solid var(--line); border-radius: 8px;
+}
+.ov-head { display: flex; align-items: center; gap: 8px; }
+.ov-head .lab { font-size: 12px; color: var(--text); }
+.ov-head .spacer { flex: 1; }
+.ov-head button { padding: 2px 9px; font-size: 12px; }
+.ov-row {
+  display: flex; align-items: center; gap: 6px; margin-top: 6px;
+}
+.ov-row .ov-text { flex: 1; min-width: 80px; }
+.ov-row label { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--dim); }
+.ov-row input[type="number"] { width: 60px; padding: 3px 5px; font-size: 12px; }
+.ov-row input[type="color"] { width: 28px; height: 24px; padding: 1px; }
+.ov-row button { padding: 2px 8px; }

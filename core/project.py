@@ -186,6 +186,60 @@ class Transition:
 
 
 @dataclass
+class Overlay:
+    """钉在画面上的一段字：标题、注解、花字。
+
+    和 clips[].text 的区别：那一句是整句的字幕，位置和时机都由模板定死；
+    这里是你自己往某一帧、某个位置上贴的东西，时间是句内相对时间。
+    """
+
+    text: str = ""
+    start: float = 0.0              # 句内起点（秒）
+    end: float | None = None        # 句内终点，None = 到这一句结束
+    x: float = 0.5                  # 0–1，相对画面宽
+    y: float = 0.25                 # 0–1，相对画面高
+    size: int = 56                  # 字号，按 1080 宽设计，随画面等比缩放
+    color: str = "#FFFFFF"
+    bg: str = "#00000099"
+    stroke: str = "#000000"
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "Overlay":
+        o = cls(
+            text=str(d.get("text", "")),
+            start=_num(d.get("start"), 0.0) or 0.0,
+            end=_num(d.get("end"), None),
+            x=_num(d.get("x"), 0.5) if d.get("x") is not None else 0.5,
+            y=_num(d.get("y"), 0.25) if d.get("y") is not None else 0.25,
+            size=int(_num(d.get("size"), 56) or 56),
+            color=d.get("color", "#FFFFFF"),
+            bg=d.get("bg", "#00000099"),
+            stroke=d.get("stroke", "#000000"),
+        )
+        if o.end is not None and o.end <= o.start:
+            raise ProjectError(f"贴字的终点（{o.end}）必须大于起点（{o.start}）")
+        o.x = max(0.0, min(1.0, o.x))
+        o.y = max(0.0, min(1.0, o.y))
+        o.size = max(8, min(300, o.size))
+        return o
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {"text": self.text}
+        default = Overlay()
+        for k in ("start", "end", "x", "y", "size", "color", "bg", "stroke"):
+            v = getattr(self, k)
+            if v != getattr(default, k):
+                d[k] = round(v, 4) if isinstance(v, float) else v
+        return d
+
+    def window(self, clip_seconds: float) -> tuple[float, float]:
+        """这段字在句内什么时候显示。"""
+        a = max(0.0, min(self.start, clip_seconds))
+        b = clip_seconds if self.end is None else min(self.end, clip_seconds)
+        return (a, max(a + 0.05, b))
+
+
+@dataclass
 class Audio:
     path: str | None = None
     duration: float | None = None
@@ -258,6 +312,7 @@ class Clip:
     duration: float | None = None     # 显式覆盖；否则用音频时长，再否则按字数估
     kenburns: bool | str = False      # True / "in" / "out" / False
     transition: Transition | None = None
+    overlays: list[Overlay] = field(default_factory=list)
     note: str = ""
 
     @classmethod
@@ -275,6 +330,8 @@ class Clip:
             duration=_num(d.get("duration"), None),
             kenburns=d.get("kenburns", False),
             transition=Transition.from_dict(d.get("transition")),
+            overlays=[Overlay.from_dict(o) for o in (d.get("overlays") or [])
+                      if str(o.get("text", "")).strip()],
             note=d.get("note", ""),
         )
 
@@ -291,6 +348,8 @@ class Clip:
             d["kenburns"] = self.kenburns
         if self.transition:
             d["transition"] = self.transition.to_dict()
+        if self.overlays:
+            d["overlays"] = [o.to_dict() for o in self.overlays]
         if self.note:
             d["note"] = self.note
         return d
