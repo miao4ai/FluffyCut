@@ -252,13 +252,24 @@ def put_project(name: str, payload: dict = Body(...)) -> dict[str, Any]:
 # ---------------------------------------------------------------- 素材
 
 
+# Python 的 mimetypes 给 .m4a 猜的是 audio/mp4a-latm，浏览器不认这个类型，
+# <audio> 会直接拒播 —— "点了没声音"就是这么来的。这里按扩展名钉死。
+PLAYABLE_TYPES = {
+    ".m4a": "audio/mp4", ".aac": "audio/aac", ".mp3": "audio/mpeg",
+    ".wav": "audio/wav", ".aiff": "audio/aiff", ".aif": "audio/aiff",
+    ".caf": "audio/x-caf", ".flac": "audio/flac",
+    ".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime",
+}
+
+
 @app.get("/api/p/{name}/file/{rel:path}")
 def get_file(name: str, rel: str) -> FileResponse:
     project = load(name)
     target = inside(project, rel)
     if not target.is_file():
         raise HTTPException(404, f"没有这个文件：{rel}")
-    return FileResponse(target, headers={"Cache-Control": "no-cache"})
+    return FileResponse(target, headers={"Cache-Control": "no-cache"},
+                        media_type=PLAYABLE_TYPES.get(target.suffix.lower()))
 
 
 IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp")

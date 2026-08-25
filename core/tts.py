@@ -52,7 +52,9 @@ class SayEngine:
     """macOS 内置 TTS。零成本、离线、够用。"""
 
     name: str = "say"
-    fmt: str = "aiff"
+    # m4a 而不是 aiff：体积小一个数量级，浏览器和 WKWebView 都能直接放。
+    # aiff 仍然支持（老工程里就是它），只是不再是默认。
+    fmt: str = "m4a"
 
     def available(self) -> bool:
         return shutil.which("say") is not None

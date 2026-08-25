@@ -205,7 +205,8 @@ function clipRow(c, i, dc) {
           <span class="tag hidden" data-tag-audio></span>
           <span class="tag hidden" data-tag-visual>缺配图</span>
           <span class="clip-actions">
-            <button data-act="tts" title="给这句配音">音</button>
+            <button data-act="hear" title="试听这一句（空格）">▶</button>
+            <button data-act="tts" title="用 TTS 给这句配音">配</button>
             <button data-act="up" title="上移">↑</button>
             <button data-act="down" title="下移">↓</button>
             <button data-act="dup" title="复制">⧉</button>
@@ -456,8 +457,10 @@ async function clipAction(i, act) {
       clips.splice(i, 1);
       state.selected = Math.max(0, i - 1);
       return save({ repaintList: true });
+    case "hear":
+      return hearClip(i);
     case "tts":
-      return runTTS({ clips: [clips[i].id] });
+      return runTTS({ clips: [clips[i].id] }, i);
   }
 }
 
@@ -532,7 +535,7 @@ async function setTransition(i, type, duration) {
 
 /* ---------------------------------------------------------------- 配音 / 渲染 */
 
-async function runTTS(payload) {
+async function runTTS(payload, playAfter = null) {
   const btn = $("#btn-tts");
   btn.disabled = true;
   btn.textContent = "配音中…";
@@ -546,7 +549,13 @@ async function runTTS(payload) {
       }),
     });
     apply(data);
-    toast(`配好了 ${data.done.length} 句，时长已回写`);
+    if (!data.done.length) {
+      // 一句都没配成，多半是台词是空的 —— 别回一句"配好了 0 句"糊弄人
+      toast("没有可配的句子：台词是空的，先写上字", true);
+    } else {
+      toast(`配好了 ${data.done.length} 句，时长已回写`);
+      if (playAfter !== null) hearClip(playAfter);   // 配完直接放一遍，省得再找按钮
+    }
   } catch (e) {
     toast(e.message, true);
   } finally {
@@ -589,6 +598,25 @@ async function poll(id) {
     $("#btn-render").disabled = false;
     toast(e.message, true);
   }
+}
+
+/* 试听单句。声音可能来自 TTS，也可能是导入原片时切下来的那一段。 */
+function hearClip(i) {
+  const c = state.project.clips[i];
+  if (!c) return;
+  if (!c.audio?.path) {
+    return toast(
+      c.text.trim() ? "这句还没配音，点旁边的「配」" : "这句还没写台词，写完再点「配」",
+      true);
+  }
+  const audio = $("#audio");
+  if (!audio.paused && audio.dataset.clip === c.id) {
+    audio.pause();
+    return;
+  }
+  audio.src = `/api/p/${state.name}/file/${c.audio.path}?v=${Date.now()}`;
+  audio.dataset.clip = c.id;
+  audio.play().catch((e) => toast(`放不出来：${e.message}`, true));
 }
 
 /* ---------------------------------------------------------------- 通读播放 */
@@ -882,6 +910,10 @@ function bind() {
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !$("#modal").classList.contains("hidden")) return closeNewDialog();
     const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "");
+    if (!typing && e.key === " ") {
+      e.preventDefault();
+      return hearClip(state.selected);
+    }
     if (!typing && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
       e.preventDefault();
       return step(e.key === "ArrowRight" ? 1 : -1);
