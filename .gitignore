@@ -1,0 +1,24 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 打包产物
+build/
+dist/
+packaging/icon.png
+packaging/FluffyCut.icns
+packaging/*.iconset/
+
+# 渲染产物与配音：都能从 project.json 重新生成，不进 git
+projects/**/out.mp4
+projects/**/frame.png
+projects/**/subtitles.ass
+projects/**/*.json.tmp
+projects/**/assets/voice/
+
+# 示例素材里唯一的视频，体积小、跑 scripts/make_demo_assets.py 也能重建，留着方便开箱即用
+projects/**/*.mp4
+!projects/edit-demo/assets/clip.mp4
+
+.DS_Store

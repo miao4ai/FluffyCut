@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "title": "没文化到底有多可怕?",
+  "style": {
+    "font": "PingFang SC",
+    "title_color": "#FFE100",
+    "brand_text": "拒绝废话",
+    "avatar": "assets/avatar.png"
+  },
+  "video": {
+    "width": 1080,
+    "height": 1920,
+    "fps": 30,
+    "bg": "#000000"
+  },
+  "clips": [
+    {
+      "id": "c1",
+      "text": "冰雹一般出现在什么季节?",
+      "visual": { "type": "image", "path": "assets/1.png", "prompt": "夏日午后压城的乌云，广角，写实" },
+      "duration": 2.0,
+      "kenburns": true
+    },
+    {
+      "id": "c2",
+      "text": "大部分人张口就来: 冬天。",
+      "visual": { "type": "image", "path": "assets/2.png", "prompt": "结冰的窗户与呼出的白气，冷色调" },
+      "duration": 2.4,
+      "kenburns": true
+    },
+    {
+      "id": "c3",
+      "text": "错。冰雹的旺季是夏天。",
+      "visual": { "type": "image", "path": "assets/3.png", "prompt": "冰雹砸在草地上的特写，高速摄影" },
+      "duration": 2.2,
+      "kenburns": true
+    },
+    {
+      "id": "c4",
+      "text": "因为它靠的是强对流,不是低温。",
+      "visual": { "type": "image", "path": "assets/4.png", "prompt": "积雨云剖面示意图，上升气流箭头" },
+      "duration": 2.8,
+      "kenburns": true
+    },
+    {
+      "id": "c5",
+      "text": "地面越热,上升气流越猛,冰粒才被反复托举长大。",
+      "visual": { "type": "image", "path": "assets/5.png", "prompt": "冰雹在云中反复上下，分层结构剖面" },
+      "duration": 3.0,
+      "kenburns": true
+    },
+    {
+      "id": "c6",
+      "text": "所以下次别再说冬天了。",
+      "visual": { "type": "image", "path": "assets/6.png", "prompt": "阳光下融化的冰雹，收尾镜头" },
+      "duration": 2.2,
+      "kenburns": true
+    }
+  ]
+}

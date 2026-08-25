@@ -1,0 +1,100 @@
+{
+  "version": 1,
+  "title": "剪辑能力回归测试",
+  "style": {
+    "font": "PingFang SC",
+    "title_color": "#FFE100",
+    "brand_text": "拒绝废话",
+    "avatar": "assets/avatar.png"
+  },
+  "video": {
+    "width": 1080,
+    "height": 1920,
+    "fps": 30,
+    "bg": "#000000"
+  },
+  "music": {
+    "path": "assets/bgm.m4a",
+    "volume": 0.2,
+    "fade_in": 1.0,
+    "fade_out": 1.5,
+    "duck": true,
+    "start": 0.0
+  },
+  "clips": [
+    {
+      "id": "c1",
+      "text": "第一句：单张图，推近。",
+      "visual": {
+        "type": "image",
+        "path": "assets/1.png"
+      },
+      "duration": 2.0,
+      "kenburns": "in",
+      "transition": {
+        "type": "fade",
+        "duration": 0.4
+      }
+    },
+    {
+      "id": "c2",
+      "text": "第二句：一句话里切三个镜头。",
+      "visual": [
+        {
+          "type": "image",
+          "path": "assets/2.png"
+        },
+        {
+          "type": "image",
+          "path": "assets/3.png",
+          "seconds": 1.0
+        },
+        {
+          "type": "image",
+          "path": "assets/4.png"
+        }
+      ],
+      "duration": 3.0,
+      "transition": {
+        "type": "slideleft",
+        "duration": 0.35
+      }
+    },
+    {
+      "id": "c3",
+      "text": "第三句：视频素材，只取 4 到 6 秒。",
+      "visual": {
+        "type": "video",
+        "path": "assets/clip.mp4",
+        "in": 4.0,
+        "out": 6.0
+      },
+      "duration": 2.0,
+      "transition": {
+        "type": "dissolve",
+        "duration": 0.5
+      }
+    },
+    {
+      "id": "c4",
+      "text": "第四句：同一段素材两倍速。",
+      "visual": {
+        "type": "video",
+        "path": "assets/clip.mp4",
+        "speed": 2.0
+      },
+      "duration": 2.0
+    },
+    {
+      "id": "c5",
+      "text": "第五句：素材不够长就定格。",
+      "visual": {
+        "type": "video",
+        "path": "assets/clip.mp4",
+        "in": 11.0,
+        "out": 12.0
+      },
+      "duration": 3.0
+    }
+  ]
+}
