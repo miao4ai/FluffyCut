@@ -118,6 +118,16 @@ class Report:
             "cuts": [round(c, 3) for c in self.cuts],
         }
 
+    @classmethod
+    def from_dict(cls, d: dict) -> "Report":
+        """从工程里存着的那份还原。原片轨要靠它重建。"""
+        r = cls(path=d.get("path", ""), duration=float(d.get("duration") or 0),
+                source=d.get("source", "silence"))
+        r.segments = [Segment(float(x["start"]), float(x["end"]), x.get("text", ""))
+                      for x in d.get("segments", [])]
+        r.cuts = [float(c) for c in d.get("cuts", [])]
+        return r
+
     def summary(self) -> str:
         pace = "偏快" if self.seconds_per_sentence < 1.5 else (
             "偏慢" if self.seconds_per_sentence > 3.0 else "在甜区里")
@@ -359,6 +369,16 @@ def analyze(path: str | Path, with_text: bool = False) -> Report:
         report.segments = segments_from_cuts(report.cuts, total)
         report.source = "cuts"
     return report
+
+
+def reference_block(report: Report, path: str, name: str) -> dict:
+    """存进 project.json 的那份原片信息。够重建原片轨，也够复制到编辑轴。"""
+    return {
+        "name": name, "path": path, "duration": report.duration,
+        "source": report.source, "stats": report.to_dict()["stats"],
+        "segments": [s.to_dict() for s in report.segments],
+        "cuts": [round(c, 3) for c in report.cuts],
+    }
 
 
 def to_project(report: Report, title: str = "", keep_text: bool = True,

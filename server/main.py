@@ -103,6 +103,45 @@ def _cached_duration(path: Path) -> float:
     return _DURATION_CACHE[key]
 
 
+def _reference_timeline(project: Project) -> dict[str, Any] | None:
+    """原片轨：和编辑轴长得一样的一条时间轴，只是只读。
+
+    它不是 project.clips，而是从导入时存下来的分析结果重建的 —— 两条轨互不影响，
+    编辑轴怎么改都不会动到原片。
+    """
+    ref = project.extra.get("reference")
+    if not isinstance(ref, dict) or not project.exists(ref.get("path")):
+        return None
+    report = analyze.Report.from_dict(ref)
+    if not report.segments:
+        return None
+    src = project.resolve(ref["path"])
+    assert src is not None
+    total = _cached_duration(src)
+
+    clips = []
+    for i, seg in enumerate(report.segments):
+        cuts = [c for c in report.cuts if seg.start < c < seg.end]
+        edges = [seg.start, *cuts, seg.end]
+        clips.append({
+            "index": i,
+            "start": round(seg.start, 3),
+            "seconds": round(seg.duration, 3),
+            "text": seg.text,
+            "pace": ("fast" if seg.duration < project_module.PACE_MIN
+                     else "slow" if seg.duration > project_module.PACE_MAX else "ok"),
+            "shots": [
+                {"index": j, "type": "video", "path": ref["path"],
+                 "start": round(a - seg.start, 3), "seconds": round(b - a, 3),
+                 "src_in": round(a, 3), "src_out": round(b, 3), "src_seconds": total,
+                 "speed": 1.0, "exists": True, "crop": {}}
+                for j, (a, b) in enumerate(zip(edges, edges[1:]))
+            ],
+        })
+    return {"path": ref["path"], "name": ref.get("name", ""),
+            "duration": round(total, 3), "source": report.source, "clips": clips}
+
+
 def _compare_info(project: Project) -> dict[str, Any] | None:
     """对比片。没显式设过就看看工程里有没有导入时留下的原片。"""
     conf = project.extra.get("compare")
@@ -176,6 +215,7 @@ def view(project: Project, name: str) -> dict[str, Any]:
         ],
         "transitions": list(project_module.TRANSITIONS),
         "compare": _compare_info(project),
+        "reference_timeline": _reference_timeline(project),
         "music": _music_info(project),
     }
     ai_ok, ai_why = ai.available()
@@ -426,6 +466,46 @@ def thumb(name: str, path: str = Query(...), w: int = Query(160),
     img.save(buf, "JPEG", quality=80)
     return Response(buf.getvalue(), media_type="image/jpeg",
                     headers={"Cache-Control": "no-cache"})
+
+
+@app.post("/api/p/{name}/reference/copy")
+def copy_reference(name: str, payload: dict = Body(default={})) -> dict[str, Any]:
+    """把原片复制到编辑轴。
+
+    不给 index 就是整条复制（覆盖编辑轴）；给了就只复制那一句，插在当前句后面。
+    复制过来的片段指向原片对应的那一段，并带上原声 —— 直接就能改。
+    """
+    project = load(name)
+    ref = project.extra.get("reference")
+    if not isinstance(ref, dict) or not project.exists(ref.get("path")):
+        raise HTTPException(400, "这个工程没有原片")
+    report = analyze.Report.from_dict(ref)
+    if not report.segments:
+        raise HTTPException(400, "原片没有分析出句子")
+    src = project.resolve(ref["path"])
+    assert src is not None
+
+    index = payload.get("index")
+    if index is None:
+        built = analyze.to_project(report, title=project.title, source=ref["path"])
+        project.clips = built.clips
+        project.save()
+        analyze.slice_audio(report, project, src)
+    else:
+        i = max(0, min(int(index), len(report.segments) - 1))
+        one = analyze.Report(path=report.path, duration=report.segments[i].duration,
+                             segments=[report.segments[i]],
+                             cuts=[c for c in report.cuts
+                                   if report.segments[i].start < c < report.segments[i].end])
+        built = analyze.to_project(one, source=ref["path"])
+        clip = built.clips[0]
+        clip.id = project.new_clip_id()
+        at = int(payload.get("after", len(project.clips) - 1)) + 1
+        project.clips.insert(max(0, min(at, len(project.clips))), clip)
+        project.save()
+        analyze.slice_audio(one, Project(clips=[clip], path=project.path), src)
+    project.save()
+    return view(project, name)
 
 
 @app.post("/api/p/{name}/compare")
@@ -781,18 +861,12 @@ def _launch_analyze(raw: Path, filename: str, ext: str, name: str, transcribe: b
                 src_rel = f"assets/source{ext}"
                 shutil.copy2(raw, root / src_rel)
 
-            project = analyze.to_project(report, title=stem, source=src_rel)
-            project.extra["reference"] = {
-                "name": filename, "duration": report.duration,
-                "source": report.source, "stats": report.to_dict()["stats"],
-            }
+            # 编辑轴一开始是空的：原片单独一条轨摆着参考，要用再复制过来。
+            project = analyze.to_project(report, title=stem, source=None) if rhythm_only \
+                else Project(title=stem, clips=[project_module.Clip(id="c1", text="")])
+            project.extra["reference"] = analyze.reference_block(
+                report, src_rel or "", filename)
             project.save(root / "project.json")
-
-            if src_rel:
-                job.note = "按句切开原声…"
-                job.progress = 0.92
-                analyze.slice_audio(report, project, root / src_rel)
-                project.save()
 
             (root / "analysis.json").write_text(
                 json.dumps(report.to_dict(), ensure_ascii=False, indent=2) + "\n", "utf-8")
