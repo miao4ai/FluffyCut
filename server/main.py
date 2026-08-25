@@ -92,7 +92,7 @@ def view(project: Project, name: str) -> dict[str, Any]:
             {
                 "id": c.id,
                 "start": start,
-                "seconds": c.seconds,
+                "seconds": project.seconds_of(c),
                 "pace": c.pace,
                 "chars": len(c.text.strip()),
                 "has_audio": bool(c.audio and c.audio.path),
@@ -112,7 +112,7 @@ def view(project: Project, name: str) -> dict[str, Any]:
                         "speed": v.speed,
                         "exists": v.type == "color" or project.exists(v.path),
                     }
-                    for j, (v, s0, dur) in enumerate(c.shots())
+                    for j, (v, s0, dur) in enumerate(project.shots_of(c))
                 ],
             }
             for i, (c, start, _e) in enumerate(timeline)

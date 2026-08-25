@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import math
 import shutil
 import sys
 import tempfile
@@ -30,6 +31,7 @@ from .layers import kenburns_for
 from .project import Clip, Project, ProjectError, Visual
 
 AUDIO_RATE = 44100
+DUCK_FRAME = 1024          # 闪避时两路旁链的固定帧长，见 _audio_graph
 KENBURNS_AMOUNT = 0.12
 KENBURNS_OVERSCAN = 1.25   # Ken Burns 前先放大一点，推近时才不糊
 
@@ -84,8 +86,12 @@ def _subtitle_pngs(project: Project, workdir: Path) -> dict[str, Path]:
     return result
 
 
-def build_command(project: Project, out: Path, workdir: Path, opts: RenderOptions) -> list[str]:
-    """把工程翻译成一条 ffmpeg 命令。单独拿出来是为了能直接肉眼检查 / 单测。"""
+def build_command(project: Project, out: Path, workdir: Path, opts: RenderOptions,
+                  voice: Path | None = None) -> list[str]:
+    """把工程翻译成一条 ffmpeg 命令。单独拿出来是为了能直接肉眼检查 / 单测。
+
+    voice 是预渲好的人声轨；开了音乐闪避时必须给（见 _audio_graph 的说明）。
+    """
     v = project.video
     W, H, FPS = v.width, v.height, v.fps
 
@@ -105,12 +111,11 @@ def build_command(project: Project, out: Path, workdir: Path, opts: RenderOption
 
     kb_w, kb_h = int(W * KENBURNS_OVERSCAN), int(H * KENBURNS_OVERSCAN)
     seg_labels: list[str] = []      # 每句一个画面段
-    alabels: list[str] = []
 
     for ci, clip in enumerate(project.clips):
         trans = project.transition_after(ci)
         tail = trans.duration if trans else 0.0     # 为转场多渲的那一截
-        shots = clip.shots()
+        shots = project.shots_of(clip)
         shot_labels: list[str] = []
 
         for si, (shot, _start, dur) in enumerate(shots):
@@ -157,42 +162,19 @@ def build_command(project: Project, out: Path, workdir: Path, opts: RenderOption
 
         # 字幕只在本句时长内显示：转场那一截是上一句画面的余韵，不该还挂着字
         s = add_input(["-loop", "1", "-framerate", FPS, "-i", subs[clip.id]])
-        enable = f":enable='lt(t,{clip.seconds:.3f})'" if tail else ""
+        enable = f":enable='lt(t,{project.seconds_of(clip):.3f})'" if tail else ""
         # settb 统一时基：xfade 要求两路输入时基一致，各分支经过的滤镜不同会跑偏
         filters.append(
             f"{pic}[{s}:v]overlay=0:0:format=auto:shortest=1{enable},settb=1/{FPS}[v{ci}]"
         )
         seg_labels.append(f"[v{ci}]")
 
-        # 声音：有配音就裁/补到该句时长，没有就补静音
-        apath = project.resolve(clip.audio.path) if clip.audio and clip.audio.path else None
-        dur = clip.seconds
-        if apath and apath.exists():
-            a = add_input(["-i", apath])
-            gain = clip.audio.gain if clip.audio else 1.0
-            vol = f",volume={gain:.3f}" if gain != 1.0 else ""
-            filters.append(
-                f"[{a}:a]aformat=sample_fmts=fltp:sample_rates={AUDIO_RATE}:channel_layouts=stereo,"
-                f"apad,atrim=duration={dur:.3f},asetpts=PTS-STARTPTS{vol}[a{ci}]"
-            )
-        else:
-            a = add_input(["-f", "lavfi", "-t", f"{dur:.3f}",
-                           "-i", f"anullsrc=r={AUDIO_RATE}:cl=stereo"])
-            filters.append(f"[{a}:a]asetpts=PTS-STARTPTS[a{ci}]")
-        alabels.append(f"[a{ci}]")
-
     filters.append(_video_chain(project, seg_labels))
-    filters.append("".join(alabels) + f"concat=n={len(alabels)}:v=0:a=1[voice]")
 
     t = add_input(["-loop", "1", "-framerate", FPS, "-i", template_png])
     filters.append(f"[vcat][{t}:v]overlay=0:0:format=auto:shortest=1,format=yuv420p[vout]")
 
-    if project.music:
-        m = add_input(["-stream_loop", "-1", "-i", project.resolve(project.music.path)])
-        filters.append(_music_chain(project, m))
-        amap = "[aout]"
-    else:
-        amap = "[voice]"
+    amap = _audio_graph(project, voice, add_input, filters)
 
     return [
         "ffmpeg", "-hide_banner", "-v", "error", "-nostdin", "-y",
@@ -249,6 +231,106 @@ def _video_chain(project: Project, seg_labels: list[str]) -> str:
     return ";".join(parts)
 
 
+def _voice_filters(project: Project, add_input, filters: list[str]) -> str:
+    """把每句配音接成整条人声轨。没配音的句子补等长静音，时长以帧对齐后的为准。"""
+    labels = []
+    for ci, clip in enumerate(project.clips):
+        dur = project.seconds_of(clip)
+        apath = project.resolve(clip.audio.path) if clip.audio and clip.audio.path else None
+        if apath and apath.exists():
+            a = add_input(["-i", apath])
+            gain = clip.audio.gain if clip.audio else 1.0
+            vol = f",volume={gain:.3f}" if gain != 1.0 else ""
+            filters.append(
+                f"[{a}:a]aformat=sample_fmts=fltp:sample_rates={AUDIO_RATE}:channel_layouts=stereo,"
+                f"apad,atrim=duration={dur:.3f},asetpts=PTS-STARTPTS{vol}[a{ci}]"
+            )
+        else:
+            a = add_input(["-f", "lavfi", "-t", f"{dur:.3f}",
+                           "-i", f"anullsrc=r={AUDIO_RATE}:cl=stereo"])
+            filters.append(f"[{a}:a]asetpts=PTS-STARTPTS[a{ci}]")
+        labels.append(f"[a{ci}]")
+    filters.append("".join(labels) + f"concat=n={len(labels)}:v=0:a=1[voice]")
+    return "[voice]"
+
+
+def _audio_graph(project: Project, voice: Path | None, add_input, filters: list[str]) -> str:
+    """人声 + 背景音乐，返回最终音频标签。
+
+    开闪避时人声要用两次（一路进混音、一路当旁链）。用 asplit 分流会出问题：
+    两条支路的推进顺序不定，同一份工程渲两次音轨不一样，有时候甚至完全没压下去。
+    所以闪避走「先把人声预渲成 wav，再作为两个独立输入喂进来」—— 没有共享节点，
+    也就没有那条竞争路径。
+    """
+    if voice is not None:
+        v = add_input(["-i", voice])
+        filters.append(f"[{v}:a]aformat=sample_fmts=fltp:sample_rates={AUDIO_RATE}:"
+                       f"channel_layouts=stereo[voice]")
+    else:
+        _voice_filters(project, add_input, filters)
+
+    if not project.music:
+        return "[voice]"
+
+    m = add_input([*_music_input(project), "-i", project.resolve(project.music.path)])
+    filters.append(_music_chain(project, m))
+
+    if not project.music.duck:
+        filters.append("[voice][music]amix=inputs=2:normalize=0:dropout_transition=0[aout]")
+        return "[aout]"
+
+    if voice is None:
+        raise ProjectError("音乐闪避需要先预渲人声轨（render() 会处理，直接调 build_command 时请传 voice）")
+    k = add_input(["-i", voice])        # 同一个文件再开一路解码，和上面互不干扰
+    # 两路都切成固定 1024 采样一帧：sidechaincompress 的包络状态跟收到的帧长有关，
+    # 帧长不一致时结果会随两路的到达顺序变，同一份工程渲两次音轨就不一样。
+    filters.append(f"[{k}:a]aformat=sample_fmts=fltp:sample_rates={AUDIO_RATE}:"
+                   f"channel_layouts=stereo,asetnsamples=n={DUCK_FRAME}:p=0[key]")
+    filters.append(f"[music]asetnsamples=n={DUCK_FRAME}:p=0[music_f]")
+    filters.append("[music_f][key]sidechaincompress="
+                   "threshold=0.04:ratio=4:attack=20:release=350[ducked]")
+    filters.append("[voice][ducked]amix=inputs=2:normalize=0:dropout_transition=0[aout]")
+    return "[aout]"
+
+
+def build_voice_command(project: Project, out: Path) -> list[str]:
+    """只把人声轨渲出来（闪避用）。纯音频，很快。"""
+    inputs: list[str] = []
+    filters: list[str] = []
+    idx = 0
+
+    def add_input(args: list[str]) -> int:
+        nonlocal idx
+        inputs.extend([str(a) for a in args])
+        idx += 1
+        return idx - 1
+
+    label = _voice_filters(project, add_input, filters)
+    return [
+        "ffmpeg", "-hide_banner", "-v", "error", "-nostdin", "-y",
+        *inputs, "-filter_complex", ";".join(filters),
+        "-map", label, "-c:a", "pcm_f32le", "-ar", str(AUDIO_RATE), "-ac", "2",
+        str(out),
+    ]
+
+
+def _music_input(project: Project) -> list[str]:
+    """音乐不够长就循环几遍。
+
+    这里必须算出**有限**的循环次数：`-stream_loop -1` 是个永不结束的输入，
+    滤镜图收尾时它多吐多少样本要看线程调度，同一份工程渲两次音轨会不一样，
+    确定性就没了。
+    """
+    m = project.music
+    assert m is not None
+    src = project.resolve(m.path)
+    usable = media.duration(src) - max(0.0, m.start) if src else 0.0
+    if usable <= 0.01:
+        return ["-stream_loop", "0"]
+    loops = max(0, math.ceil(project.duration / usable) - 1)
+    return ["-stream_loop", str(loops)]
+
+
 def _music_chain(project: Project, index: int) -> str:
     """背景音乐：裁到片长、淡入淡出、可选闪避（有人说话就自动压低）。"""
     m = project.music
@@ -264,17 +346,7 @@ def _music_chain(project: Project, index: int) -> str:
         chain += f",afade=t=in:st=0:d={m.fade_in:.3f}"
     if m.fade_out > 0:
         chain += f",afade=t=out:st={fade_out_at:.3f}:d={m.fade_out:.3f}"
-    chain += "[music]"
-
-    if not m.duck:
-        return chain + ";[voice][music]amix=inputs=2:normalize=0:dropout_transition=0[aout]"
-    # 人声作为旁链去压音乐，说话时音乐自动让路
-    return (
-        chain
-        + ";[voice]asplit=2[voice_out][key]"
-        + ";[music][key]sidechaincompress=threshold=0.04:ratio=4:attack=20:release=350[ducked]"
-        + ";[voice_out][ducked]amix=inputs=2:normalize=0:dropout_transition=0[aout]"
-    )
+    return chain + "[music]"
 
 
 def render(
@@ -294,7 +366,15 @@ def render(
     out.parent.mkdir(parents=True, exist_ok=True)
     workdir = Path(tempfile.mkdtemp(prefix="fluffycut-"))
     try:
-        cmd = build_command(project, out, workdir, opts)
+        voice = None
+        if project.music and project.music.duck:
+            voice = workdir / "voice.wav"
+            if opts.dry_run:
+                print(" ".join(_quote(c) for c in build_voice_command(project, voice)))
+            else:
+                media.run(build_voice_command(project, voice))
+
+        cmd = build_command(project, out, workdir, opts, voice)
         if opts.dry_run:
             print(" ".join(_quote(c) for c in cmd))
             return out

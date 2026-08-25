@@ -160,22 +160,37 @@ if __name__ == "__main__":
 class TestShots(unittest.TestCase):
     """一句话切多个镜头。"""
 
+    def _spans(self, visuals, duration=3.0, fps=30):
+        """返回 (project, clip, 各镜头时长)。分镜边界由 project 算，它才知道 fps。"""
+        p = Project.from_dict({
+            "video": {"fps": fps},
+            "clips": [{"id": "c1", "duration": duration, "visual": visuals}],
+        })
+        c = p.clips[0]
+        return p, c, [round(d, 3) for _v, _s, d in p.shots_of(c)]
+
     def _clip(self, visuals, duration=3.0):
         return Clip.from_dict({"id": "c1", "duration": duration, "visual": visuals}, 0)
 
     def test_free_shots_split_evenly(self):
-        c = self._clip([{"type": "color"}, {"type": "color"}, {"type": "color"}], 3.0)
-        self.assertEqual([round(d, 2) for _v, _s, d in c.shots()], [1.0, 1.0, 1.0])
+        _p, _c, spans = self._spans([{"type": "color"}] * 3, 3.0)
+        self.assertEqual(spans, [1.0, 1.0, 1.0])
 
     def test_fixed_shot_takes_its_seconds(self):
-        c = self._clip([{"type": "color"}, {"type": "color", "seconds": 2.0}], 3.0)
-        self.assertEqual([round(d, 2) for _v, _s, d in c.shots()], [1.0, 2.0])
+        _p, _c, spans = self._spans([{"type": "color"}, {"type": "color", "seconds": 2.0}], 3.0)
+        self.assertEqual(spans, [1.0, 2.0])
 
     def test_shots_always_sum_to_clip_duration(self):
-        """浮点误差不能让镜头总和偏离本句时长，否则时间轴会漂。"""
+        """镜头加起来必须正好是本句的帧数，差一帧时间轴就开始漂。"""
         for n in (1, 3, 7):
-            c = self._clip([{"type": "color"}] * n, 2.53)
-            self.assertAlmostEqual(sum(d for _v, _s, d in c.shots()), 2.53, places=3)
+            p, c, spans = self._spans([{"type": "color"}] * n, 2.53)
+            self.assertEqual(sum(round(d * 30) for d in spans), p.frames_of(c))
+
+    def test_shots_get_at_least_one_frame(self):
+        """镜头比帧还多也不能出现 0 帧的段，ffmpeg 接不住。"""
+        p, c, spans = self._spans([{"type": "color"}] * 5, 0.1)
+        self.assertTrue(all(d > 0 for d in spans))
+        self.assertEqual(len(spans), 5)
 
     def test_single_shot_writes_back_as_object(self):
         one = self._clip([{"type": "color"}]).to_dict()["visual"]
@@ -184,10 +199,10 @@ class TestShots(unittest.TestCase):
         self.assertIsInstance(many, list)
 
     def test_shot_at_picks_the_right_one(self):
-        c = self._clip([{"type": "color", "color": "#111111"},
-                        {"type": "color", "color": "#222222"}], 2.0)
-        self.assertEqual(layers.shot_at(c, 0.5)[0].color, "#111111")
-        self.assertEqual(layers.shot_at(c, 1.5)[0].color, "#222222")
+        p, c, _spans = self._spans([{"type": "color", "color": "#111111"},
+                                    {"type": "color", "color": "#222222"}], 2.0)
+        self.assertEqual(layers.shot_at(p, c, 0.5)[0].color, "#111111")
+        self.assertEqual(layers.shot_at(p, c, 1.5)[0].color, "#222222")
 
     def test_video_trim_validation(self):
         with self.assertRaises(ProjectError):
@@ -232,12 +247,12 @@ class TestTransitions(unittest.TestCase):
 class TestRenderGraph(unittest.TestCase):
     """检查滤镜图的关键结构，比跑一次 ffmpeg 快得多。"""
 
-    def _graph(self, data):
+    def _graph(self, data, voice=None):
         import tempfile
 
         p = Project.from_dict(data, DEMO)
         with tempfile.TemporaryDirectory() as tmp:
-            cmd = build_command(p, Path(tmp) / "o.mp4", Path(tmp), RenderOptions())
+            cmd = build_command(p, Path(tmp) / "o.mp4", Path(tmp), RenderOptions(), voice)
         return p, cmd, cmd[cmd.index("-filter_complex") + 1]
 
     def test_xfade_offset_is_the_next_clip_start(self):
@@ -281,13 +296,32 @@ class TestRenderGraph(unittest.TestCase):
         self.assertIn("tpad=stop_mode=clone", graph)      # 素材只够 0.5s，其余定格
 
     def test_music_chain_and_ducking(self):
-        _p, _cmd, graph = self._graph({
-            "music": {"path": "assets/bgm.m4a", "volume": 0.2},
-            "clips": [{"id": "a", "duration": 2.0}],
-        })
+        _p, _cmd, graph = self._graph(
+            {"music": {"path": "assets/bgm.m4a", "volume": 0.2},
+             "clips": [{"id": "a", "duration": 2.0}]},
+            voice=Path("/tmp/voice.wav"),
+        )
         self.assertIn("volume=0.200", graph)
         self.assertIn("sidechaincompress", graph)
         self.assertIn("amix=inputs=2", graph)
+        # 两路旁链都必须固定帧长，否则同一份工程渲两次音轨不一样
+        self.assertEqual(graph.count("asetnsamples=n=1024"), 2)
+        self.assertNotIn("asplit", graph)
+
+    def test_ducking_without_prerendered_voice_is_refused(self):
+        """宁可报错也不要悄悄退化成不确定的图。"""
+        with self.assertRaises(ProjectError):
+            self._graph({"music": {"path": "assets/bgm.m4a"},
+                         "clips": [{"id": "a", "duration": 2.0}]})
+
+    def test_voice_track_is_rendered_separately_for_ducking(self):
+        from core.render import build_voice_command
+
+        p = Project.from_dict({"clips": [{"id": "a", "duration": 2.0},
+                                         {"id": "b", "duration": 1.0}]}, DEMO)
+        cmd = build_voice_command(p, Path("/tmp/v.wav"))
+        self.assertIn("concat=n=2:v=0:a=1[voice]", cmd[cmd.index("-filter_complex") + 1])
+        self.assertIn("pcm_f32le", cmd)
 
     def test_music_without_ducking_is_a_plain_mix(self):
         _p, _cmd, graph = self._graph({
@@ -298,7 +332,16 @@ class TestRenderGraph(unittest.TestCase):
         self.assertIn("amix=inputs=2", graph)
 
     def test_per_clip_gain(self):
-        _p, _cmd, graph = self._graph({"clips": [
-            {"id": "a", "duration": 2.0, "audio": {"path": "assets/voice/c1.aiff", "gain": 0.5}},
-        ]})
-        self.assertIn("volume=0.500", graph)
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "assets").mkdir()
+            (root / "assets" / "v.aiff").write_bytes(b"")   # 只判断存在，内容无所谓
+            project = Project.from_dict(
+                {"clips": [{"id": "a", "duration": 2.0,
+                            "audio": {"path": "assets/v.aiff", "gain": 0.5}}]},
+                root / "project.json",
+            )
+            cmd = build_command(project, root / "o.mp4", root, RenderOptions())
+        self.assertIn("volume=0.500", cmd[cmd.index("-filter_complex") + 1])

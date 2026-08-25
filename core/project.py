@@ -283,30 +283,6 @@ class Clip:
             return max(0.1, round(float(self.audio.duration) + TAIL_PAD, 3))
         return estimate_duration(self.text)
 
-    def shots(self) -> list[tuple[Visual, float, float]]:
-        """把本句时长分给各镜头：[(镜头, 句内起点, 时长)]。
-
-        规则：写了 seconds 的镜头按写的来，剩下的时间由没写的平分。
-        """
-        total = round(self.seconds, 3)
-        fixed = sum(v.seconds for v in self.visuals if v.seconds)
-        free = [v for v in self.visuals if not v.seconds]
-        each = max(0.0, total - fixed) / len(free) if free else 0.0
-
-        # 先算各镜头起点再相减取时长：这样各段严丝合缝，且总和恰好等于本句时长，
-        # 不会因为逐个四舍五入攒出误差。
-        starts, t = [], 0.0
-        for v in self.visuals:
-            starts.append(round(t, 3))
-            t += v.seconds if v.seconds else each
-
-        out = []
-        for i, v in enumerate(self.visuals):
-            start = starts[i]
-            end = starts[i + 1] if i + 1 < len(self.visuals) else total
-            out.append((v, start, round(max(MIN_SHOT_SECONDS, end - start), 3)))
-        return out
-
     @property
     def pace(self) -> str:
         """节奏标签：太快 / 合适 / 拖沓。界面用它给时长条上色。"""
@@ -461,18 +437,59 @@ class Project:
         except ValueError:
             return str(p)
 
+    # ---------- 时间轴：一律以帧为单位算 ----------
+    #
+    # 画面只能按整帧裁，配音却能按任意秒数裁。如果时间轴用秒来累加，每句都会
+    # 差半帧上下，逐句累积就成了肉眼可见的音画不同步。所以每句先吸附到整数帧，
+    # 音视频都按这个吸附后的长度走 —— 30fps / 44100Hz 下一帧正好 1470 个采样，
+    # 两条轨能对到采样级。
+
+    def frames_of(self, clip: Clip) -> int:
+        return max(1, int(round(clip.seconds * self.video.fps)))
+
+    def seconds_of(self, clip: Clip) -> float:
+        """这一句在成片里真正占的时长（已吸附到整帧）。"""
+        return round(self.frames_of(clip) / self.video.fps, 6)
+
     @property
     def duration(self) -> float:
-        return round(sum(c.seconds for c in self.clips), 3)
+        return round(sum(self.frames_of(c) for c in self.clips) / self.video.fps, 6)
 
     def timeline(self) -> list[tuple[Clip, float, float]]:
-        """[(clip, start, end)]，累加得到，帧级确定。转场不改变它。"""
-        out, t = [], 0.0
+        """[(clip, start, end)]，帧级确定。转场不改变它。"""
+        fps = self.video.fps
+        out, f = [], 0
         for c in self.clips:
-            d = c.seconds
-            out.append((c, round(t, 3), round(t + d, 3)))
-            t += d
+            n = self.frames_of(c)
+            out.append((c, round(f / fps, 6), round((f + n) / fps, 6)))
+            f += n
         return out
+
+    def shots_of(self, clip: Clip) -> list[tuple[Visual, float, float]]:
+        """把本句时长分给各镜头：[(镜头, 句内起点, 时长)]。
+
+        规则：写了 seconds 的镜头按写的来，剩下的时间由没写的平分。
+        边界同样吸附到帧，并且保证首尾相接、加起来正好是本句的帧数。
+        """
+        fps = self.video.fps
+        n = len(clip.visuals)
+        total = max(n, self.frames_of(clip))        # 每个镜头至少留 1 帧
+
+        fixed = sum(v.seconds for v in clip.visuals if v.seconds)
+        free = [v for v in clip.visuals if not v.seconds]
+        each = max(0.0, self.seconds_of(clip) - fixed) / len(free) if free else 0.0
+
+        bounds, t = [0], 0.0
+        for i, v in enumerate(clip.visuals, start=1):
+            t += v.seconds if v.seconds else each
+            # 单调递增、每段至少 1 帧，并给后面的镜头留够位置
+            bounds.append(max(bounds[-1] + 1, min(int(round(t * fps)), total - (n - i))))
+        bounds[-1] = total
+
+        return [
+            (v, round(bounds[i] / fps, 6), round((bounds[i + 1] - bounds[i]) / fps, 6))
+            for i, v in enumerate(clip.visuals)
+        ]
 
     def transition_after(self, index: int) -> Transition | None:
         """第 index 句到下一句的转场，时长已按前后两句夹紧。
@@ -485,8 +502,11 @@ class Project:
         t = self.clips[index].transition
         if not t:
             return None
-        cap = min(self.clips[index].seconds, self.clips[index + 1].seconds) / 2
-        return Transition(t.type, round(min(t.duration, max(0.05, cap)), 3))
+        fps = self.video.fps
+        cap = min(self.seconds_of(self.clips[index]), self.seconds_of(self.clips[index + 1])) / 2
+        seconds = min(t.duration, max(1 / fps, cap))
+        frames = max(1, int(round(seconds * fps)))       # 转场也按整帧走
+        return Transition(t.type, round(frames / fps, 6))
 
     def clip(self, clip_id: str) -> Clip:
         for c in self.clips:
@@ -512,9 +532,10 @@ class Project:
                 if v.type in ("image", "video") and not self.exists(v.path):
                     problems.append(f"{where}的素材找不到：{v.path}")
             fixed = sum(v.seconds for v in c.visuals if v.seconds)
-            if fixed > c.seconds + 1e-6:
+            if fixed > self.seconds_of(c) + 1e-6:
                 problems.append(
-                    f"第 {i} 句（{c.id}）的镜头时长加起来 {fixed:.2f}s，超过了本句的 {c.seconds:.2f}s"
+                    f"第 {i} 句（{c.id}）的镜头时长加起来 {fixed:.2f}s，"
+                    f"超过了本句的 {self.seconds_of(c):.2f}s"
                 )
             if c.audio and c.audio.path and not self.exists(c.audio.path):
                 problems.append(f"第 {i} 句（{c.id}）的配音找不到：{c.audio.path}")

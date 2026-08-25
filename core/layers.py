@@ -338,9 +338,9 @@ def _fit(src: Image.Image, size: tuple[int, int], mode: str, bg: RGBA) -> Image.
     return canvas
 
 
-def shot_at(clip: Clip, t: float) -> tuple[Visual, float, float]:
+def shot_at(project: Project, clip: Clip, t: float) -> tuple[Visual, float, float]:
     """本句第 t 秒落在哪个镜头上：(镜头, 镜头内的时间, 镜头时长)。"""
-    spans = clip.shots()
+    spans = project.shots_of(clip)
     for shot, start, dur in spans:
         if start <= t < start + dur:
             return shot, t - start, dur
@@ -353,7 +353,7 @@ def render_visual(project: Project, clip: Clip, t: float) -> Image.Image:
     video = project.video
     size = (video.width, video.height)
     bg = parse_color(video.bg, (0, 0, 0, 255))
-    shot, local_t, shot_seconds = shot_at(clip, t)
+    shot, local_t, shot_seconds = shot_at(project, clip, t)
 
     if shot.type == "image" and shot.path:
         path = project.resolve(shot.path)
