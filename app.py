@@ -56,6 +56,37 @@ def wait_until_up(url: str, timeout: float = 25.0) -> bool:
     return False
 
 
+class Bridge:
+    """暴露给页面的原生能力。
+
+    为什么需要：HTML 的 <input type="file"> 在 WKWebView 里未必弹得出面板，
+    「学参考片」按下去没反应就是这么来的。而且本地 app 根本没必要把几百 MB 的
+    视频塞进 HTTP 上传 —— 直接把路径交给后端，它自己去读就行。
+    """
+
+    FILTERS = {
+        "video": ("视频 (*.mp4;*.mov;*.m4v;*.webm;*.mkv)", "所有文件 (*.*)"),
+        "audio": ("音频/视频 (*.mp3;*.m4a;*.aac;*.wav;*.aiff;*.flac;*.mp4;*.mov)",
+                  "所有文件 (*.*)"),
+        "media": ("图片或视频 (*.png;*.jpg;*.jpeg;*.webp;*.mp4;*.mov;*.m4v)", "所有文件 (*.*)"),
+    }
+
+    def __init__(self) -> None:
+        self.window = None
+
+    def pick(self, kind: str = "media") -> str | None:
+        """开一个原生的文件选择面板，返回绝对路径；取消则返回 None。"""
+        import webview
+
+        if self.window is None:
+            return None
+        got = self.window.create_file_dialog(
+            webview.OPEN_DIALOG, allow_multiple=False,
+            file_types=self.FILTERS.get(kind, self.FILTERS["media"]),
+        )
+        return str(got[0]) if got else None
+
+
 def serve(port: int) -> threading.Thread:
     import uvicorn
 
@@ -98,9 +129,10 @@ def main(argv: list[str] | None = None) -> int:
         try:
             import webview
 
-            window = webview.create_window(
+            bridge = Bridge()
+            bridge.window = webview.create_window(
                 APP_NAME, url, width=1440, height=920, min_size=(1080, 680),
-                background_color="#0e0f12",
+                background_color="#0e0f12", js_api=bridge,
             )
             webview.start()          # 窗口关掉就返回，守护线程里的服务跟着退出
             return 0

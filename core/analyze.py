@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import statistics
 import subprocess
 import sys
@@ -24,13 +25,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import media
-from .project import Clip, Project, Style, Video, Visual
+from .project import Audio, Clip, Project, Style, Video, Visual
 
 # silencedetect 的判定：低于 -32dB 且持续 0.35s 以上算停顿
 SILENCE_DB = -32
 SILENCE_MIN = 0.35
 # 短于这个的"语音段"多半是杂音，不当成一句话
 MIN_SPEECH = 0.35
+# 一句话最长到这儿；再长就按镜头切点切开，还长就等分。
+# 不这么做的话，一条从头到尾都有声音的片子会变成"一句 50 秒"，等于没法编辑。
+MAX_SEGMENT = 6.0
+TARGET_SEGMENT = 3.5
 # 场景切换阈值，越小越敏感。跑两遍：
 # ffmpeg 的 scene 判定看的是亮度，两个镜头亮度接近、只有颜色不同时会整刀漏掉，
 # 所以再拿色度平面（U）跑一遍补上。实测纯色切换 5 刀里亮度只抓到 1 刀，色度 5 刀全中；
@@ -119,7 +124,8 @@ class Report:
         lines = [
             f"参考片：{Path(self.path).name}",
             f"  总长 {self.duration:.1f} 秒，{len(self.segments)} 句"
-            + (f"（{self.source} 转写）" if self.source != "silence" else "（按停顿切分，没有台词）"),
+            + {"silence": "（按停顿切分，没有台词）",
+               "cuts": "（按镜头切点切分，没有人声）"}.get(self.source, f"（{self.source} 转写）"),
             f"  每句平均 {self.seconds_per_sentence:.2f} 秒，中位数 {self.median_sentence:.2f} 秒 —— {pace}",
             f"  人声占 {self.speech_ratio * 100:.0f}%，其余是停顿和纯画面",
             f"  镜头切了 {len(self.cuts)} 次，约 {self.cuts_per_minute:.1f} 次/分钟",
@@ -293,6 +299,39 @@ def _ts(ms: float) -> float:
 # ---------------------------------------------------------------- 主流程
 
 
+def split_long(segments: list[Segment], cuts: list[float],
+               max_len: float = MAX_SEGMENT, target: float = TARGET_SEGMENT) -> list[Segment]:
+    """把过长的段切碎：优先切在镜头切点上，实在没有就等分。
+
+    台词留在第一块上 —— 与其把一句话胡乱劈成几截，不如让人自己去分。
+    """
+    out: list[Segment] = []
+    for seg in segments:
+        if seg.duration <= max_len:
+            out.append(seg)
+            continue
+        inner = [c for c in cuts if seg.start + 0.4 < c < seg.end - 0.4]
+        pieces: list[tuple[float, float]] = []
+        for a, b in zip([seg.start, *inner], [*inner, seg.end]):
+            if b - a <= max_len:
+                pieces.append((a, b))
+                continue
+            n = max(2, round((b - a) / target))
+            step = (b - a) / n
+            pieces += [(a + i * step, a + (i + 1) * step) for i in range(n)]
+        for i, (a, b) in enumerate(pieces):
+            out.append(Segment(round(a, 3), round(b, 3), seg.text if i == 0 else ""))
+    return out
+
+
+def segments_from_cuts(cuts: list[float], total: float,
+                       target: float = TARGET_SEGMENT) -> list[Segment]:
+    """完全没有人声时，按镜头切点分段；连切点都没有就按目标长度等分。"""
+    edges = [0.0, *[c for c in cuts if 0.2 < c < total - 0.2], total]
+    return split_long([Segment(round(a, 3), round(b, 3)) for a, b in zip(edges, edges[1:])],
+                      cuts, MAX_SEGMENT, target)
+
+
 def analyze(path: str | Path, with_text: bool = False) -> Report:
     """拆一个参考片。with_text=True 且装了 whisper 才会转写台词。"""
     path = Path(path)
@@ -310,19 +349,28 @@ def analyze(path: str | Path, with_text: bool = False) -> Report:
         segments, engine = got
         report.segments = [s for s in segments if s.duration >= MIN_SPEECH]
         report.source = engine
-    else:
-        if not media.has_audio(path):
-            report.segments = []
-        else:
-            report.segments = detect_speech(path, total)
+    elif media.has_audio(path):
+        report.segments = detect_speech(path, total)
+
+    # 一整条都有声音（音乐垫底的片子很常见）会得到"一句 50 秒"，那不是时间轴，
+    # 是一坨。切开它，让人拿到手就能编辑。
+    report.segments = split_long(report.segments, report.cuts)
+    if not report.segments:
+        report.segments = segments_from_cuts(report.cuts, total)
+        report.source = "cuts"
     return report
 
 
-def to_project(report: Report, title: str = "", keep_text: bool = True) -> Project:
-    """把分析结果变成一份同节奏的 project.json 骨架。
+def to_project(report: Report, title: str = "", keep_text: bool = True,
+               source: str | None = None) -> Project:
+    """把分析结果变成一份可以直接开剪的工程。
 
     一句话 = 一个片段，时长照抄参考片；参考片在这句话中间切了几刀，
-    这个片段就带几个镜头，各自的长度也照抄。填上自己的内容就是自己的片子。
+    这个片段就带几个镜头，各自的长度也照抄。
+
+    给了 source（工程内的视频相对路径）就是「把这个片子打开来剪」：每个镜头指向
+    原片对应的那一段（in/out），渲染出来基本还原原片，然后你可以一句一句替换。
+    不给就是「只要节奏」：镜头全是纯色占位，等你填自己的素材。
     """
     project = Project(
         title=title or f"仿：{Path(report.path).stem}",
@@ -343,7 +391,16 @@ def to_project(report: Report, title: str = "", keep_text: bool = True) -> Proje
         start, end = bounds[i], bounds[i + 1]
         cuts = [c for c in report.cuts if start < c < end]
         edges = [start, *cuts, end]
-        shots = [Visual(type="color", seconds=round(b - a, 3)) for a, b in zip(edges, edges[1:])]
+        if source:
+            # 每个镜头指回原片的那一段，于是这份工程是「原片的可编辑副本」
+            shots = [
+                Visual(type="video", path=source, src_in=round(a, 3), src_out=round(b, 3),
+                       seconds=round(b - a, 3))
+                for a, b in zip(edges, edges[1:])
+            ]
+        else:
+            shots = [Visual(type="color", seconds=round(b - a, 3))
+                     for a, b in zip(edges, edges[1:])]
         # 最后一个镜头不写死时长：让它去吃剩下的时间。写死的话，各镜头之和会比
         # 吸附到整帧之后的句长多出小半帧，工程一打开就报"镜头时长超过本句"。
         shots[-1].seconds = None
@@ -358,6 +415,30 @@ def to_project(report: Report, title: str = "", keep_text: bool = True) -> Proje
     return project
 
 
+def slice_audio(report: Report, project: Project, source: Path,
+                rel_dir: str = "assets/voice") -> int:
+    """把原片的声音按句切开，挂到各个片段上 —— 打开就能听出原来的样子。
+
+    走的是普通的 clip.audio 字段，所以之后想重新配音，「配音」按钮直接覆盖掉即可。
+    """
+    from . import tts
+
+    made = 0
+    for clip, seg in zip(project.clips, report.segments):
+        rel = f"{rel_dir}/{clip.id}.m4a"
+        dest = project.resolve(rel)
+        assert dest is not None
+        try:
+            media.extract_audio(source, dest, start=seg.start, end=seg.end)
+        except media.MediaError:
+            continue
+        clip.audio = Audio(path=rel, duration=media.duration(dest),
+                           text_sha=tts.text_sha(clip.text))
+        clip.duration = round(project.seconds_of(clip), 3)   # 时长仍以原片为准
+        made += 1
+    return made
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="python -m core.analyze",
@@ -369,6 +450,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--title", default="", help="骨架的标题")
     ap.add_argument("--json", metavar="文件", help="把完整分析结果写成 json")
     ap.add_argument("--no-text", action="store_true", help="骨架里不带扒下来的台词")
+    ap.add_argument("--rhythm-only", action="store_true",
+                    help="只要节奏：镜头留成纯色占位，不把原片放进工程")
     args = ap.parse_args(argv)
 
     try:
@@ -396,11 +479,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n分析结果已写入 {args.json}")
 
     if args.project:
-        project = to_project(report, args.title, keep_text=not args.no_text)
         out = Path(args.project)
-        out.mkdir(parents=True, exist_ok=True)
+        (out / "assets").mkdir(parents=True, exist_ok=True)
+        rel = None
+        if not args.rhythm_only:
+            src = out / "assets" / f"source{Path(args.video).suffix.lower()}"
+            shutil.copy2(args.video, src)
+            rel = f"assets/{src.name}"
+        project = to_project(report, args.title, keep_text=not args.no_text, source=rel)
         project.save(out / "project.json")
-        print(f"同节奏的骨架已生成：{out / 'project.json'}"
+        if rel:
+            n = slice_audio(report, project, out / rel)
+            project.save()
+            print(f"原片已放进工程，{n} 句带上了原声")
+        print(f"工程已生成：{out / 'project.json'}"
               f"（{len(project.clips)} 句 / {project.duration:.1f} 秒）")
     return 0
 

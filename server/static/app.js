@@ -172,8 +172,9 @@ function clipRow(c, i, dc) {
 /* 一个镜头 = 一块缩略图。点它选中，双击换素材。 */
 function shotChip(c, i, sh) {
   const on = state.selected === i && state.shot === sh.index;
+  // 视频镜头要显示自己入点那一帧，不然同一条片子切出来的镜头长得一模一样
   const thumb = sh.exists && sh.path
-    ? `<img loading="lazy" src="/api/p/${state.name}/thumb?path=${encodeURIComponent(sh.path)}&w=120">`
+    ? `<img loading="lazy" src="/api/p/${state.name}/thumb?path=${encodeURIComponent(sh.path)}&w=120&t=${(sh.src_in || 0).toFixed(2)}">`
     : `<span class="ph">${sh.type === "color" ? "纯色" : "缺素材"}</span>`;
   const badge = sh.type === "video"
     ? `<em title="取素材 ${sh.src_in}s 起">✂ ${sh.src_in.toFixed(1)}s${sh.speed !== 1 ? " ×" + sh.speed : ""}</em>`
@@ -400,29 +401,25 @@ async function clipAction(i, act) {
 }
 
 /* 换素材 / 加镜头都走这里：append=true 就是在这句话末尾加一个新镜头 */
-function pickMedia(i, shot = 0, append = false) {
-  const input = document.createElement("input");
-  input.type = "file";
-  input.accept = "image/*,video/mp4,video/quicktime";
-  input.onchange = async () => {
-    if (!input.files?.[0]) return;
-    const fd = new FormData();
-    fd.append("file", input.files[0]);
-    const q = `clip=${encodeURIComponent(state.project.clips[i].id)}&shot=${shot}&append=${append}`;
-    try {
-      const data = await fetch(`/api/p/${state.name}/upload?${q}`, { method: "POST", body: fd })
-        .then(async (r) => {
-          if (!r.ok) throw new Error((await r.json()).detail);
-          return r.json();
-        });
-      apply(data);
-      select(i, append ? shotsOf(state.project.clips[i]).length - 1 : shot);
-      toast(append ? "镜头已加上" : "素材已替换");
-    } catch (e) {
-      toast(e.message, true);
-    }
-  };
-  input.click();
+async function pickMedia(i, shot = 0, append = false) {
+  const clip = state.project.clips[i].id;
+  const native = await pickNativePath("media");
+  const file = native ? null : isDesktop() ? null : await pickUpload("image/*,video/mp4,video/quicktime");
+  if (!native && !file) return;
+  try {
+    const data = native
+      ? await api(`/api/p/${state.name}/import_path`, {
+          method: "POST", body: JSON.stringify({ path: native, clip, shot, append }),
+        })
+      : await uploadFile(
+          `/api/p/${state.name}/upload?clip=${encodeURIComponent(clip)}&shot=${shot}&append=${append}`,
+          file);
+    apply(data);
+    select(i, append ? shotsOf(state.project.clips[i]).length - 1 : shot);
+    toast(append ? "镜头已加上" : "素材已替换");
+  } catch (e) {
+    toast(e.message, true);
+  }
 }
 
 async function delShot(i, j) {
@@ -811,6 +808,33 @@ function bind() {
   });
 }
 
+/* ---------------------------------------------------------------- 选文件 */
+
+/* 桌面版走原生面板：<input type="file"> 在 WKWebView 里未必弹得出来（「学参考片」
+   按下去没反应就是这么来的），而且本地 app 没必要把几百 MB 的视频塞进 HTTP 上传。
+   浏览器里没有 pywebview，自动退回上传。 */
+async function pickNativePath(kind) {
+  const api = window.pywebview?.api;
+  if (!api?.pick) return null;
+  try {
+    return (await api.pick(kind)) || null;
+  } catch {
+    return null;
+  }
+}
+
+const isDesktop = () => !!window.pywebview?.api?.pick;
+
+function pickUpload(accept) {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = accept;
+    input.onchange = () => resolve(input.files?.[0] || null);
+    input.click();
+  });
+}
+
 /* ---------------------------------------------------------------- 新建工程 */
 
 /* 目录名：中文原样留着（文件系统认得），只把空白和标点换成短横 */
@@ -910,32 +934,37 @@ function paintReference() {
 }
 
 /* 读入一个参考片：上传 -> 后台分析 -> 打开生成的骨架 */
-function learnFromVideo() {
-  const input = document.createElement("input");
-  input.type = "file";
-  input.accept = "video/*";
-  input.onchange = async () => {
-    const f = input.files?.[0];
-    if (!f) return;
-    const tr = state.caps?.transcriber;
-    toast(tr ? `正在拆解 ${f.name}（含转写，可能要一会儿）…` : `正在拆解 ${f.name}（没装 whisper，只扒节奏）…`);
-    const fd = new FormData();
-    fd.append("file", f);
-    try {
-      const job = await fetch(`/api/analyze?transcribe=${!!tr}`, { method: "POST", body: fd })
-        .then(async (r) => {
-          if (!r.ok) throw new Error((await r.json()).detail);
-          return r.json();
-        });
-      const done = await pollJob(job.id, (j) => toast(j.note || "分析中…"));
-      await loadProjects();
-      await open(done.result.project);
-      toast(done.result.summary.split("\n").slice(1).join(" · ").replace(/\s+/g, " "), false, 9000);
-    } catch (e) {
-      toast(e.message, true);
-    }
-  };
-  input.click();
+async function learnFromVideo() {
+  const tr = state.caps?.transcriber;
+  const native = await pickNativePath("video");
+  const file = native ? null : isDesktop() ? null : await pickUpload("video/*");
+  if (!native && !file) return;
+  const label = native ? native.split("/").pop() : file.name;
+
+  toast(`正在拆解 ${label}${tr ? "（含转写，可能要一会儿）" : "（没装 whisper，只扒节奏）"}…`);
+  try {
+    const job = native
+      ? await api("/api/analyze_path", {
+          method: "POST", body: JSON.stringify({ path: native, transcribe: !!tr }),
+        })
+      : await uploadFile(`/api/analyze?transcribe=${!!tr}`, file);
+    const done = await pollJob(job.id, (j) => toast(j.note || "分析中…"));
+    await loadProjects();
+    await open(done.result.project);
+    select(0);
+    toast(done.result.summary.split("\n").slice(1).join(" · ").replace(/\s+/g, " "), false, 9000);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+/* 浏览器里的上传通道 */
+async function uploadFile(url, file) {
+  const fd = new FormData();
+  fd.append("file", file);
+  const r = await fetch(url, { method: "POST", body: fd });
+  if (!r.ok) throw new Error((await r.json()).detail);
+  return r.json();
 }
 
 /* ---------------------------------------------------------------- 配乐 */
@@ -972,28 +1001,23 @@ function paintMusic() {
 }
 
 function bindMusic() {
-  $("#btn-music-pick").onclick = () => {
-    const input = document.createElement("input");
-    input.type = "file";
+  $("#btn-music-pick").onclick = async () => {
     // 视频也收：参考片的配乐常常就藏在视频里，后端会自动抽音轨
-    input.accept = "audio/*,video/*";
-    input.onchange = async () => {
-      if (!input.files?.[0]) return;
-      const fd = new FormData();
-      fd.append("file", input.files[0]);
-      try {
-        const data = await fetch(`/api/p/${state.name}/upload_music`, { method: "POST", body: fd })
-          .then(async (r) => {
-            if (!r.ok) throw new Error((await r.json()).detail);
-            return r.json();
-          });
-        apply(data);
-        toast(/\.(mp4|mov|m4v|webm)$/i.test(input.files[0].name) ? "已从视频里抽出音轨" : "配乐已加上");
-      } catch (e) {
-        toast(e.message, true);
-      }
-    };
-    input.click();
+    const native = await pickNativePath("audio");
+    const file = native ? null : isDesktop() ? null : await pickUpload("audio/*,video/*");
+    if (!native && !file) return;
+    const label = native ? native.split("/").pop() : file.name;
+    try {
+      const data = native
+        ? await api(`/api/p/${state.name}/music_path`, {
+            method: "POST", body: JSON.stringify({ path: native }),
+          })
+        : await uploadFile(`/api/p/${state.name}/upload_music`, file);
+      apply(data);
+      toast(/\.(mp4|mov|m4v|webm|mkv)$/i.test(label) ? "已从视频里抽出音轨" : "配乐已加上");
+    } catch (e) {
+      toast(e.message, true);
+    }
   };
 
   // 一边听一边定起点：听到副歌开始，点一下就写进去

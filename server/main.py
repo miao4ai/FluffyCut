@@ -258,11 +258,37 @@ async def upload(name: str, clip: str = Query(...), shot: int = Query(0),
     if ext not in IMAGE_EXT + VIDEO_EXT:
         raise HTTPException(400, f"不支持的素材格式：{ext}")
 
+    data = await file.read()
+    return _ingest_media(project, name, target, ext, shot, append, data=data)
+
+
+@app.post("/api/p/{name}/import_path")
+def import_media_path(name: str, payload: dict = Body(...)) -> dict[str, Any]:
+    """桌面版专用：原生选择器给的是本地路径，直接拷进工程，不走 HTTP 上传。"""
+    project = load(name)
+    target = project.clip(str(payload.get("clip") or ""))
+    src = Path(str(payload.get("path") or "")).expanduser()
+    if not src.is_file():
+        raise HTTPException(404, f"文件不存在：{src}")
+    ext = src.suffix.lower()
+    if ext not in IMAGE_EXT + VIDEO_EXT:
+        raise HTTPException(400, f"不支持的素材格式：{ext}")
+    return _ingest_media(project, name, target, ext, int(payload.get("shot") or 0),
+                         bool(payload.get("append")), src=src)
+
+
+def _ingest_media(project: Project, name: str, target: Clip, ext: str, shot: int,
+                  append: bool, data: bytes | None = None,
+                  src: Path | None = None) -> dict[str, Any]:
     slot = len(target.visuals) if append else max(0, min(shot, len(target.visuals) - 1))
-    rel = f"assets/{clip}_{slot}{ext}" if slot or append else f"assets/{clip}{ext}"
+    rel = f"assets/{target.id}_{slot}{ext}" if slot or append else f"assets/{target.id}{ext}"
     dest = inside(project, rel)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(await file.read())
+    if data is not None:
+        dest.write_bytes(data)
+    else:
+        assert src is not None
+        shutil.copy2(src, dest)
 
     v = Visual(type="video" if ext in VIDEO_EXT else "image", path=rel)
     if append:
@@ -286,25 +312,45 @@ async def upload_music(name: str, file: UploadFile = File(...),
     if ext not in AUDIO_EXT + VIDEO_EXT:
         raise HTTPException(400, f"不支持的格式：{ext}（音频或视频都行）")
 
-    trimming = start > 0 or end is not None
-    if ext in VIDEO_EXT or trimming:
-        # 视频要抽轨、音频要裁段，都先落到临时文件再交给 ffmpeg
-        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
-            tmp.write(await file.read())
-            raw = Path(tmp.name)
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+        tmp.write(await file.read())
+        raw = Path(tmp.name)
+    try:
+        return _ingest_music(project, name, raw, ext, start, end, file.filename or raw.name)
+    finally:
+        raw.unlink(missing_ok=True)
+
+
+@app.post("/api/p/{name}/music_path")
+def upload_music_path(name: str, payload: dict = Body(...)) -> dict[str, Any]:
+    """桌面版专用：本地路径直接当配乐（视频会自动抽音轨）。"""
+    project = load(name)
+    src = Path(str(payload.get("path") or "")).expanduser()
+    if not src.is_file():
+        raise HTTPException(404, f"文件不存在：{src}")
+    ext = src.suffix.lower()
+    if ext not in AUDIO_EXT + VIDEO_EXT:
+        raise HTTPException(400, f"不支持的格式：{ext}（音频或视频都行）")
+    start = float(payload.get("start") or 0)
+    end = payload.get("end")
+    return _ingest_music(project, name, src, ext, start,
+                         float(end) if end is not None else None, src.name)
+
+
+def _ingest_music(project: Project, name: str, src: Path, ext: str,
+                  start: float, end: float | None, label: str) -> dict[str, Any]:
+    if ext in VIDEO_EXT or start > 0 or end is not None:
         rel = "assets/bgm.m4a"
         try:
-            media.extract_audio(raw, inside(project, rel), start, end)
+            media.extract_audio(src, inside(project, rel), start, end)
         except media.MediaError as e:
             # 报错里要出现用户认得的文件名，不是临时文件名
-            raise HTTPException(422, str(e).replace(raw.name, file.filename or raw.name)) from e
-        finally:
-            raw.unlink(missing_ok=True)
+            raise HTTPException(422, str(e).replace(src.name, label)) from e
     else:
         rel = f"assets/bgm{ext}"
         dest = inside(project, rel)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(await file.read())
+        shutil.copy2(src, dest)
 
     project.music = project_module.Music.from_dict(
         {**(project.music.to_dict() if project.music else {}), "path": rel, "start": 0.0}
@@ -314,8 +360,13 @@ async def upload_music(name: str, file: UploadFile = File(...),
 
 
 @app.get("/api/p/{name}/thumb")
-def thumb(name: str, path: str = Query(...), w: int = Query(160)) -> Response:
-    """素材缩略图。图片直接缩，视频抽首帧 —— 界面上的镜头条要靠它。"""
+def thumb(name: str, path: str = Query(...), w: int = Query(160),
+          t: float = Query(0.0)) -> Response:
+    """素材缩略图。图片直接缩，视频抽 t 秒那一帧。
+
+    t 很重要：同一条视频被切成好几个镜头时，每个镜头得显示自己入点那一帧，
+    否则镜头条上全是一模一样的首帧，等于没有。
+    """
     import io
 
     project = load(name)
@@ -331,7 +382,7 @@ def thumb(name: str, path: str = Query(...), w: int = Query(160)) -> Response:
         if not exe:
             raise HTTPException(503, "找不到 ffmpeg，没法给视频抽帧")
         out = subprocess.run(
-            [exe, "-v", "error", "-ss", "0", "-i", str(src), "-frames:v", "1",
+            [exe, "-v", "error", "-ss", f"{max(0.0, t):.3f}", "-i", str(src), "-frames:v", "1",
              "-f", "image2pipe", "-vcodec", "png", "-"],
             capture_output=True, timeout=30,
         ).stdout
@@ -535,21 +586,47 @@ def write_settings(payload: dict = Body(default={})) -> dict[str, Any]:
 
 @app.post("/api/analyze")
 async def start_analyze(file: UploadFile = File(...), name: str = Query(""),
-                        transcribe: bool = Query(True)) -> dict[str, Any]:
-    """读入一个参考片，拆出它的节奏，生成一份同节奏的工程骨架。
-
-    解码整条视频不快，转写更慢，所以走后台任务，界面轮询 /api/jobs/{id}。
-    """
+                        transcribe: bool = Query(True),
+                        rhythm_only: bool = Query(False)) -> dict[str, Any]:
+    """上传一个视频，切成句子级的时间轴。浏览器里走这条。"""
     ext = Path(file.filename or "").suffix.lower()
-    if ext not in VIDEO_EXT + (".webm", ".mkv"):
-        raise HTTPException(400, f"参考片得是视频：{ext or '未知格式'}")
-
-    stem = Path(file.filename or "参考片").stem
-    target = _free_project_name(name or f"仿-{stem}")
+    _check_video_ext(ext)
     with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
         tmp.write(await file.read())
         raw = Path(tmp.name)
+    return _launch_analyze(raw, file.filename or raw.name, ext, name,
+                           transcribe, rhythm_only, remove_raw=True)
 
+
+@app.post("/api/analyze_path")
+def start_analyze_path(payload: dict = Body(...)) -> dict[str, Any]:
+    """桌面版专用：原生选择器给的是本地路径，几百 MB 的片子不用再上传一遍。"""
+    src = Path(str(payload.get("path") or "")).expanduser()
+    if not src.is_file():
+        raise HTTPException(404, f"文件不存在：{src}")
+    ext = src.suffix.lower()
+    _check_video_ext(ext)
+    return _launch_analyze(src, src.name, ext, str(payload.get("name") or ""),
+                           bool(payload.get("transcribe", True)),
+                           bool(payload.get("rhythm_only")), remove_raw=False)
+
+
+def _check_video_ext(ext: str) -> None:
+    if ext not in VIDEO_EXT + (".webm", ".mkv"):
+        raise HTTPException(400, f"得是视频文件：{ext or '未知格式'}")
+
+
+def _launch_analyze(raw: Path, filename: str, ext: str, name: str, transcribe: bool,
+                    rhythm_only: bool, remove_raw: bool) -> dict[str, Any]:
+    """读入一个视频，切成句子级的时间轴，直接就能开剪。
+
+    默认把原片放进工程：每个镜头指回原片对应的那一段，每句带上原声。
+    rhythm_only=true 则只要节奏，镜头留成纯色占位。
+
+    解码整条视频不快，转写更慢，所以走后台任务，界面轮询 /api/jobs/{id}。
+    """
+    stem = Path(filename).stem
+    target = _free_project_name(name or stem)
     job = Job("analyze", target)
     JOBS[job.id] = job
 
@@ -566,20 +643,34 @@ async def start_analyze(file: UploadFile = File(...), name: str = Query(""),
                 got = analyze.transcribe(raw)
                 if got:
                     segments, engine = got
-                    report.segments = [x for x in segments if x.duration >= analyze.MIN_SPEECH]
+                    report.segments = analyze.split_long(
+                        [x for x in segments if x.duration >= analyze.MIN_SPEECH], report.cuts)
                     report.source = engine
-            job.progress = 0.85
+            job.progress = 0.8
 
-            report.path = file.filename or report.path   # 报告里要出现用户认得的文件名
-            job.note = "生成同节奏的骨架…"
-            project = analyze.to_project(report, title=f"仿：{stem}")
+            report.path = filename          # 报告里要出现用户认得的文件名
+            job.note = "把原片放进工程…"
+            root = PROJECTS_DIR / target
+            (root / "assets").mkdir(parents=True, exist_ok=True)
+
+            src_rel = None
+            if not rhythm_only:
+                src_rel = f"assets/source{ext}"
+                shutil.copy2(raw, root / src_rel)
+
+            project = analyze.to_project(report, title=stem, source=src_rel)
             project.extra["reference"] = {
-                "name": file.filename, "duration": report.duration,
+                "name": filename, "duration": report.duration,
                 "source": report.source, "stats": report.to_dict()["stats"],
             }
-            root = PROJECTS_DIR / target
-            root.mkdir(parents=True, exist_ok=True)
             project.save(root / "project.json")
+
+            if src_rel:
+                job.note = "按句切开原声…"
+                job.progress = 0.92
+                analyze.slice_audio(report, project, root / src_rel)
+                project.save()
+
             (root / "analysis.json").write_text(
                 json.dumps(report.to_dict(), ensure_ascii=False, indent=2) + "\n", "utf-8")
 
@@ -593,7 +684,8 @@ async def start_analyze(file: UploadFile = File(...), name: str = Query(""),
             job.error = str(e)
             traceback.print_exc()
         finally:
-            raw.unlink(missing_ok=True)
+            if remove_raw:
+                raw.unlink(missing_ok=True)
 
     threading.Thread(target=work, daemon=True).start()
     return job.as_dict()
