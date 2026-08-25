@@ -90,6 +90,41 @@ def has_libass() -> bool:
     return bool(re.search(r"^\s*\S+\s+subtitles\s", out.stdout, re.M))
 
 
+def has_audio(path: str | Path) -> bool:
+    """这个文件里到底有没有声音（有些片子是纯画面）。"""
+    try:
+        info = probe(path)
+    except MediaError:
+        return False
+    return any(st.get("codec_type") == "audio" for st in info.get("streams", []))
+
+
+def extract_audio(src: str | Path, dest: str | Path,
+                  start: float = 0.0, end: float | None = None) -> Path:
+    """把视频里的音轨抽出来存成 m4a。可以只要中间一段。
+
+    参考片的配乐往往就藏在视频里，手动过一遍 ffmpeg 太碎；这里包一层，
+    界面上选个视频文件就能直接当背景音乐用。
+    """
+    exe = tool("ffmpeg")
+    if not exe:
+        raise MediaError("找不到 ffmpeg，装一下：brew install ffmpeg")
+    src, dest = Path(src), Path(dest)
+    if not has_audio(src):
+        raise MediaError(f"{src.name} 里没有音轨")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    cmd = [exe, "-hide_banner", "-v", "error", "-nostdin", "-y"]
+    if start > 0:
+        cmd += ["-ss", f"{start:.3f}"]
+    if end is not None and end > start:
+        cmd += ["-t", f"{end - start:.3f}"]
+    cmd += ["-i", str(src), "-vn", "-map", "0:a:0",
+            "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", str(dest)]
+    run(cmd)
+    return dest
+
+
 ProgressFn = Callable[[float, str], None]
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import tempfile
 import threading
 import traceback
 import uuid
@@ -229,17 +230,39 @@ async def upload(name: str, clip: str = Query(...), shot: int = Query(0),
 
 
 @app.post("/api/p/{name}/upload_music")
-async def upload_music(name: str, file: UploadFile = File(...)) -> dict[str, Any]:
+async def upload_music(name: str, file: UploadFile = File(...),
+                       start: float = Query(0.0), end: float | None = Query(None)) -> dict[str, Any]:
+    """设背景音乐。给视频文件也行 —— 自动把里面的音轨抽出来。
+
+    start/end 可以只取素材中间的一段（秒）。
+    """
     project = load(name)
     ext = Path(file.filename or "").suffix.lower()
-    if ext not in AUDIO_EXT:
-        raise HTTPException(400, f"不支持的音频格式：{ext}")
-    rel = f"assets/bgm{ext}"
-    dest = inside(project, rel)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(await file.read())
+    if ext not in AUDIO_EXT + VIDEO_EXT:
+        raise HTTPException(400, f"不支持的格式：{ext}（音频或视频都行）")
+
+    trimming = start > 0 or end is not None
+    if ext in VIDEO_EXT or trimming:
+        # 视频要抽轨、音频要裁段，都先落到临时文件再交给 ffmpeg
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+            tmp.write(await file.read())
+            raw = Path(tmp.name)
+        rel = "assets/bgm.m4a"
+        try:
+            media.extract_audio(raw, inside(project, rel), start, end)
+        except media.MediaError as e:
+            # 报错里要出现用户认得的文件名，不是临时文件名
+            raise HTTPException(422, str(e).replace(raw.name, file.filename or raw.name)) from e
+        finally:
+            raw.unlink(missing_ok=True)
+    else:
+        rel = f"assets/bgm{ext}"
+        dest = inside(project, rel)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(await file.read())
+
     project.music = project_module.Music.from_dict(
-        {**(project.music.to_dict() if project.music else {}), "path": rel}
+        {**(project.music.to_dict() if project.music else {}), "path": rel, "start": 0.0}
     )
     project.save()
     return view(project, name)

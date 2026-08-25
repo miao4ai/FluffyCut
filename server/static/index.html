@@ -85,7 +85,7 @@
       <summary><span>配乐</span><span class="hint" id="music-path"></span></summary>
       <div class="panel-body">
         <div class="row">
-          <button class="ghost" id="btn-music-pick">选音乐文件</button>
+          <button class="ghost" id="btn-music-pick">选音乐 / 从视频里抽</button>
           <button class="ghost" id="btn-music-clear">移除</button>
         </div>
         <div id="music-controls" class="panel-body" style="padding:0">
@@ -94,6 +94,7 @@
           <div class="row">
             <label>淡入<input id="music-fadein" type="number" step="0.5" min="0"></label>
             <label>淡出<input id="music-fadeout" type="number" step="0.5" min="0"></label>
+            <label>起点<input id="music-start" type="number" step="1" min="0"></label>
           </div>
           <label class="check"><input id="music-duck" type="checkbox"> 说话时自动压低音乐</label>
         </div>

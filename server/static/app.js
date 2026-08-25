@@ -785,6 +785,7 @@ function paintMusic() {
   $("#music-volume-label").textContent = Math.round(m.volume * 100) + "%";
   $("#music-fadein").value = m.fade_in;
   $("#music-fadeout").value = m.fade_out;
+  $("#music-start").value = m.start;
   $("#music-duck").checked = !!m.duck;
 }
 
@@ -792,7 +793,8 @@ function bindMusic() {
   $("#btn-music-pick").onclick = () => {
     const input = document.createElement("input");
     input.type = "file";
-    input.accept = "audio/*";
+    // 视频也收：参考片的配乐常常就藏在视频里，后端会自动抽音轨
+    input.accept = "audio/*,video/*";
     input.onchange = async () => {
       if (!input.files?.[0]) return;
       const fd = new FormData();
@@ -804,7 +806,7 @@ function bindMusic() {
             return r.json();
           });
         apply(data);
-        toast("配乐已加上");
+        toast(/\.(mp4|mov|m4v|webm)$/i.test(input.files[0].name) ? "已从视频里抽出音轨" : "配乐已加上");
       } catch (e) {
         toast(e.message, true);
       }
@@ -828,6 +830,7 @@ function bindMusic() {
   field("#music-volume", "volume");
   field("#music-fadein", "fade_in");
   field("#music-fadeout", "fade_out");
+  field("#music-start", "start");
   field("#music-duck", "duck", Boolean);
 }
 
