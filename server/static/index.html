@@ -38,17 +38,38 @@
       <button class="ghost" data-zoom="out" title="拉远">−</button>
       <span class="hint" id="tl-zoom">60 px/秒</span>
       <button class="ghost" data-zoom="in" title="拉近">＋</button>
-      <span class="hint" id="tl-time">划过去看某一帧</span>
       <span class="spacer"></span>
       <label class="check"><input type="checkbox" id="tl-compare"> 对比原片</label>
       <button class="ghost" id="btn-compare-pick" title="换一条对比片">选对比片</button>
     </div>
-    <div class="timeline" id="timeline" title="鼠标划过去看那一帧，点一下跳到那一句">
-      <div class="tl-inner" id="tl-inner"></div>
-      <div class="tl-head" id="tl-head"></div>
-      <div class="tl-pop hidden" id="tl-pop"><i></i><b></b></div>
+    <div class="track hidden" id="track-ref">
+      <div class="track-label">
+        <b>原片</b><span class="hint" id="ref-name-inline"></span>
+        <span class="spacer"></span>
+        <span class="hint" id="tl-ref-time"></span>
+        <button class="ghost" id="btn-copy-all" title="按原片的句子和切点，整条复制到编辑轴">整条复制到编辑轴</button>
+      </div>
+      <div class="timeline" id="tl-ref" data-track="ref" title="原片，只读。划过去看那一帧">
+        <div class="tl-inner"></div>
+        <div class="tl-head"></div>
+        <div class="tl-pop hidden"><i></i><b></b></div>
+      </div>
+    </div>
+
+    <div class="track" id="track-edit">
+      <div class="track-label">
+        <b>编辑</b><span class="hint">你自己的片子</span>
+        <span class="spacer"></span>
+        <span class="hint" id="tl-edit-time">划过去看某一帧</span>
+      </div>
+      <div class="timeline" id="tl-edit" data-track="edit" title="你的片子。划过去看那一帧，点一下跳到那一句">
+        <div class="tl-inner"></div>
+        <div class="tl-head"></div>
+        <div class="tl-pop hidden"><i></i><b></b></div>
+      </div>
     </div>
     <div class="pace-strip" id="pace-strip" title="整片节奏：每段宽度 = 时长，颜色 = 快/合适/拖沓"></div>
+    <div class="ref-card hidden" id="ref-card"></div>
     <div class="focus-bar" id="focus-bar">
       <button class="ghost" id="btn-prev" title="上一句（←）">←</button>
       <span id="focus-pos">第 1 句 / 共 1</span>

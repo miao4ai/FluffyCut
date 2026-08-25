@@ -25,6 +25,8 @@ const state = {
   shot: 0,
   viewMode: "focus",
   playhead: 0,
+  refPlayhead: 0,
+  refSelected: 0,
   pxPerSec: 60,
   compareOn: false,
   saveTimer: null,
@@ -184,7 +186,7 @@ function step(delta) {
   const i = Math.max(0, Math.min(state.project.clips.length - 1, state.selected + delta));
   select(i, 0);
   const dc = state.derived?.clips?.[i];
-  if (dc) scrub(dc.start + 0.02);
+  if (dc) scrub(TRACKS.edit, dc.start + 0.02);
 }
 
 function clipRow(c, i, dc) {
@@ -347,8 +349,8 @@ function paintPreview() {
   const sh = dc?.shots?.[state.shot];
   const t = sh ? sh.start + 0.02 : 0;
   if (dc) {
-    state.playhead = dc.start + t;      // 播放头跟着选中的镜头走
-    moveHead(state.playhead);
+    state.playhead = dc.start + t;      // 编辑轴的播放头跟着选中的镜头走
+    moveHead(TRACKS.edit);
   }
   $("#preview").src =
     `/api/p/${state.name}/frame?clip=${encodeURIComponent(c.id)}&t=${t.toFixed(2)}&v=${Date.now()}`;
@@ -929,31 +931,58 @@ function bind() {
   });
 }
 
-/* ---------------------------------------------------------------- 横向时间轴
+/* ---------------------------------------------------------------- 两条时间轴
 
-   一条从左到右的胶片：鼠标划到哪儿就看到哪一帧。
-   帧不是一张一个请求 —— 每个素材抽成一条雪碧图（服务端一次 ffmpeg 抽完并缓存），
-   格子只是把雪碧图挪到对应偏移，所以划得再快也不掉帧。 */
+   上面是原片（只读），下面是你自己的片子。两条各有各的播放头和滚动位置 ——
+   看原片第 30 秒的同时，自己的片子可以停在第 3 秒。
+
+   帧不是一张一个请求：每个素材抽成一条雪碧图（服务端一次 ffmpeg 抽完并缓存），
+   轨道上的格子只是把雪碧图挪个偏移，所以划得再快也不掉帧。 */
 
 const TILE_W = 96;                 // 雪碧图每格宽度，和 /strip 的 w 一致
 const TILE_H = 170;
-// 抽帧密度：目标每 0.4 秒一格，长片封顶 240 格（再多就是给浏览器添堵）。
-// 固定格数的话，长素材会稀得没法用 —— "抽帧不够细"就是这么来的。
-const STRIP_STEP = 0.4;
-const STRIP_MAX = 240;
-const stripCount = (seconds) =>
-  Math.max(8, Math.min(STRIP_MAX, Math.ceil((seconds || 1) / STRIP_STEP)));
 const TRACK_H = 76;                // 轨道高度
 // 雪碧图整体缩到轨道高度，一格就是这么宽 —— 不缩的话只能看见每帧的上面一截
 const TILE_SCALE = TRACK_H / TILE_H;
 const CELL_W = Math.round(TILE_W * TILE_SCALE);
+// 抽帧密度：目标每 0.4 秒一格，长片封顶 240 格（再多就是给浏览器添堵）。
+// 固定格数的话，长素材会稀得没法用。
+const STRIP_STEP = 0.4;
+const STRIP_MAX = 240;
+const stripCount = (seconds) =>
+  Math.max(8, Math.min(STRIP_MAX, Math.ceil((seconds || 1) / STRIP_STEP)));
+
+/* 两条轨唯一的区别是数据从哪来、点下去干什么 */
+const TRACKS = {
+  ref: {
+    key: "ref",
+    box: () => $("#tl-ref"),
+    timeLabel: () => $("#tl-ref-time"),
+    clips: () => state.derived?.reference_timeline?.clips || [],
+    duration: () => state.derived?.reference_timeline?.duration || 0,
+    head: () => state.refPlayhead,
+    setHead: (t) => (state.refPlayhead = t),
+    onSettle: (t) => paintCompareAt(t),
+    onClick: (hit) => paintRefCard(hit ? hit.i : 0),
+  },
+  edit: {
+    key: "edit",
+    box: () => $("#tl-edit"),
+    timeLabel: () => $("#tl-edit-time"),
+    clips: () => state.derived?.clips || [],
+    duration: () => state.derived?.duration || 0,
+    head: () => state.playhead,
+    setHead: (t) => (state.playhead = t),
+    onSettle: (t) => paintMainAt(t),
+    onClick: (hit) => hit && select(hit.i, hit.sh.index),
+  },
+};
 
 function stripUrl(sh) {
   const n = sh.type === "video" ? stripCount(sh.src_seconds) : 1;
   return `/api/p/${state.name}/strip?path=${encodeURIComponent(sh.path)}&count=${n}&w=${TILE_W}`;
 }
 
-/* 素材内的某个时刻 -> 雪碧图里的第几格 */
 function tileIndex(sh, srcTime) {
   if (sh.type !== "video" || !sh.src_seconds) return 0;
   const n = stripCount(sh.src_seconds);
@@ -968,14 +997,14 @@ function cellStyle(sh, srcTime, w) {
          `background-size:${n * CELL_W}px ${TRACK_H}px;background-position:${-i * CELL_W}px 0`;
 }
 
-function paintTimeline() {
-  const inner = $("#tl-inner");
-  const d = state.derived;
-  if (!d) return;
+function paintTrack(tr) {
+  const box = tr.box();
+  const inner = box.querySelector(".tl-inner");
   const px = state.pxPerSec;
-  $("#tl-zoom").textContent = `${px} px/秒`;
+  const clips = tr.clips();
+  const selected = tr.key === "edit" ? state.selected : state.refSelected;
 
-  inner.innerHTML = d.clips
+  inner.innerHTML = clips
     .map((c, i) => {
       const w = Math.max(2, c.seconds * px);
       const shots = (c.shots || [])
@@ -994,54 +1023,48 @@ function paintTimeline() {
           return `<div class="tl-shot" style="width:${sw}px">${tiles}</div>`;
         })
         .join("");
-      return `<div class="tl-clip ${c.pace}${i === state.selected ? " on" : ""}" data-i="${i}"
+      const text = tr.key === "edit" ? state.project.clips[i]?.text || "" : c.text || "";
+      return `<div class="tl-clip ${c.pace}${i === selected ? " on" : ""}" data-i="${i}"
                    style="width:${w}px"><span class="cap">${i + 1}. ${escapeHtml(
-        (state.project.clips[i]?.text || "").slice(0, 20))}</span>${shots}</div>`;
+        text.slice(0, 20))}</span>${shots}</div>`;
     })
     .join("");
-  moveHead(state.playhead);
+  if (!clips.length) {
+    inner.innerHTML = `<div class="tl-shot" style="width:100%"><div class="tl-empty"></div></div>`;
+  }
+  moveHead(tr);
 }
 
-function timeAt(clientX) {
-  const box = $("#timeline");
+function paintTimeline() {
+  $("#tl-zoom").textContent = `${state.pxPerSec} px/秒`;
+  const rt = state.derived?.reference_timeline;
+  $("#track-ref").classList.toggle("hidden", !rt);
+  if (rt) {
+    $("#ref-name-inline").textContent = `${rt.name || ""} · ${rt.clips.length} 句`;
+    paintTrack(TRACKS.ref);
+  }
+  paintTrack(TRACKS.edit);
+  paintRefCard(state.refSelected);
+}
+
+function timeAt(tr, clientX) {
+  const box = tr.box();
   const r = box.getBoundingClientRect();
   const x = clientX - r.left + box.scrollLeft;
-  return Math.max(0, Math.min(state.derived?.duration || 0, x / state.pxPerSec));
+  return Math.max(0, Math.min(tr.duration(), x / state.pxPerSec));
 }
 
-function moveHead(t) {
-  const box = $("#timeline");
-  $("#tl-head").style.left = `${t * state.pxPerSec - box.scrollLeft}px`;
+function moveHead(tr) {
+  const box = tr.box();
+  box.querySelector(".tl-head").style.left =
+    `${tr.head() * state.pxPerSec - box.scrollLeft}px`;
 }
 
-/* 悬停：先用雪碧图里的那一格给个即时反馈，停下来再去要一张真正合成的帧 */
-function scrub(t, { pop = null } = {}) {
-  state.playhead = t;
-  moveHead(t);
-  $("#tl-time").textContent = `${t.toFixed(2)}s`;
-
-  const hit = shotAtTime(t);
-  const popEl = $("#tl-pop");
-  if (pop !== null && hit) {
-    popEl.classList.remove("hidden");
-    popEl.style.left = `${t * state.pxPerSec - $("#timeline").scrollLeft}px`;
-    const cell = popEl.querySelector("i");
-    const n = hit.sh.type === "video" ? stripCount(hit.sh.src_seconds) : 1;
-    cell.style.backgroundImage = hit.sh.exists && hit.sh.path ? `url('${stripUrl(hit.sh)}')` : "none";
-    cell.style.backgroundSize = `${n * TILE_W}px ${TILE_H}px`;
-    cell.style.backgroundPosition = `${-tileIndex(hit.sh, hit.srcTime) * TILE_W}px 0`;
-    popEl.querySelector("b").textContent = `${t.toFixed(2)}s`;
-  }
-  clearTimeout(scrub.t);
-  scrub.t = setTimeout(() => paintPreviewAt(t), 180);
-}
-
-/* 全片第 t 秒落在哪个镜头、对应素材的哪一刻 */
-function shotAtTime(t) {
-  const d = state.derived;
-  if (!d) return null;
-  for (let i = 0; i < d.clips.length; i++) {
-    const c = d.clips[i];
+/* 全片第 t 秒落在哪个片段、对应素材的哪一刻 */
+function shotAtTime(tr, t) {
+  const clips = tr.clips();
+  for (let i = 0; i < clips.length; i++) {
+    const c = clips[i];
     if (t < c.start || t >= c.start + c.seconds) continue;
     const local = t - c.start;
     for (const sh of c.shots || []) {
@@ -1049,21 +1072,51 @@ function shotAtTime(t) {
         return { i, sh, srcTime: (sh.src_in || 0) + (local - sh.start) * (sh.speed || 1) };
       }
     }
+    return { i, sh: (c.shots || [])[0], srcTime: 0 };
   }
   return null;
 }
 
-function bindTimeline() {
-  const box = $("#timeline");
-  box.addEventListener("mousemove", (e) => scrub(timeAt(e.clientX), { pop: true }));
-  box.addEventListener("mouseleave", () => $("#tl-pop").classList.add("hidden"));
-  box.addEventListener("scroll", () => moveHead(state.playhead));
+/* 悬停：先用雪碧图里的那一格给个即时反馈，停下来再去要一张真正的帧 */
+function scrub(tr, t, { pop = false } = {}) {
+  tr.setHead(t);
+  moveHead(tr);
+  tr.timeLabel().textContent = `${t.toFixed(2)}s`;
+
+  const hit = shotAtTime(tr, t);
+  const popEl = tr.box().querySelector(".tl-pop");
+  if (pop && hit?.sh) {
+    popEl.classList.remove("hidden");
+    popEl.style.left = `${t * state.pxPerSec - tr.box().scrollLeft}px`;
+    const cell = popEl.querySelector("i");
+    const n = hit.sh.type === "video" ? stripCount(hit.sh.src_seconds) : 1;
+    cell.style.backgroundImage = hit.sh.exists && hit.sh.path ? `url('${stripUrl(hit.sh)}')` : "none";
+    cell.style.backgroundSize = `${n * TILE_W}px ${TILE_H}px`;
+    cell.style.backgroundPosition = `${-tileIndex(hit.sh, hit.srcTime) * TILE_W}px 0`;
+    popEl.querySelector("b").textContent = `${t.toFixed(2)}s`;
+  }
+  clearTimeout(scrub[`t_${tr.key}`]);   // 每条轨自己的防抖，互不打断
+  scrub[`t_${tr.key}`] = setTimeout(() => tr.onSettle(t), 180);
+}
+
+function bindTrack(tr) {
+  const box = tr.box();
+  box.addEventListener("mousemove", (e) => scrub(tr, timeAt(tr, e.clientX), { pop: true }));
+  box.addEventListener("mouseleave", () => box.querySelector(".tl-pop").classList.add("hidden"));
+  box.addEventListener("scroll", () => moveHead(tr));      // 两条轨各自滚动，互不牵连
   box.addEventListener("click", (e) => {
-    const t = timeAt(e.clientX);
-    const hit = shotAtTime(t);
-    scrub(t);
-    if (hit) select(hit.i, hit.sh.index);
+    const t = timeAt(tr, e.clientX);
+    const hit = shotAtTime(tr, t);
+    scrub(tr, t);
+    if (tr.key === "ref" && hit) state.refSelected = hit.i;
+    tr.onClick(hit);
+    if (tr.key === "ref") paintTrack(TRACKS.ref);
   });
+}
+
+function bindTimeline() {
+  bindTrack(TRACKS.ref);
+  bindTrack(TRACKS.edit);
   document.querySelectorAll("[data-zoom]").forEach((b) => {
     b.onclick = () => {
       state.pxPerSec = Math.max(10, Math.min(400,
@@ -1073,8 +1126,9 @@ function bindTimeline() {
   });
   $("#tl-compare").onchange = (e) => {
     state.compareOn = e.target.checked;
-    paintPreviewAt(state.playhead);
+    paintCompareAt(state.refPlayhead);
   };
+  $("#btn-copy-all").onclick = copyWholeReference;
   $("#btn-compare-pick").onclick = async () => {
     const native = await pickNativePath("video");
     if (!native) return toast("桌面版才能直接选文件；浏览器里请用「学参考片」导入", true);
@@ -1083,7 +1137,7 @@ function bindTimeline() {
         method: "POST", body: JSON.stringify({ path: native }),
       }));
       $("#tl-compare").checked = state.compareOn = true;
-      paintPreviewAt(state.playhead);
+      paintCompareAt(state.refPlayhead);
       toast("对比片已设好");
     } catch (e) {
       toast(e.message, true);
@@ -1091,24 +1145,85 @@ function bindTimeline() {
   };
 }
 
-/* 预览：上半是你正在改的，下半（可选）是对比片同一时刻 */
-function paintPreviewAt(t) {
+/* ---------------------------------------------------------------- 原片当前句 */
+
+function paintRefCard(i) {
+  const rt = state.derived?.reference_timeline;
+  const card = $("#ref-card");
+  card.classList.toggle("hidden", !rt);
+  if (!rt) return;
+  state.refSelected = Math.max(0, Math.min(i ?? 0, rt.clips.length - 1));
+  const c = rt.clips[state.refSelected];
+  if (!c) return;
+  const sh = c.shots[0];
+  const bg = sh
+    ? `background-image:url('${stripUrl(sh)}');background-size:${stripCount(sh.src_seconds) * 44}px 78px;` +
+      `background-position:${-tileIndex(sh, sh.src_in) * 44}px 0`
+    : "";
+  card.innerHTML = `
+    <div class="thumb" style="${bg}"></div>
+    <div class="body">
+      <div class="who">原片 · 第 ${state.refSelected + 1} 句 / 共 ${rt.clips.length}</div>
+      <div class="txt ${c.text ? "" : "empty"}">${escapeHtml(c.text || "（这一句没扒到台词）")}</div>
+      <div class="meta">${c.start.toFixed(2)}–${(c.start + c.seconds).toFixed(2)}s · ${c.seconds.toFixed(2)} 秒 · ${c.shots.length} 个镜头</div>
+    </div>
+    <button class="ghost" id="btn-copy-one">复制这一句</button>`;
+  $("#btn-copy-one").onclick = () => copyOneReference(state.refSelected);
+}
+
+async function copyWholeReference() {
+  const n = state.project.clips.filter((c) => c.text.trim() || shotsOf(c)[0]?.path).length;
+  if (n && !window.confirm?.(`编辑轴上已经有 ${n} 句，整条复制会覆盖掉，继续？`)) return;
+  try {
+    apply(await api(`/api/p/${state.name}/reference/copy`, { method: "POST", body: "{}" }));
+    select(0, 0);
+    toast(`已把原片整条复制过来（${state.project.clips.length} 句）`);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function copyOneReference(index) {
+  try {
+    apply(await api(`/api/p/${state.name}/reference/copy`, {
+      method: "POST", body: JSON.stringify({ index, after: state.selected }),
+    }));
+    select(Math.min(state.selected + 1, state.project.clips.length - 1), 0);
+    toast("这一句已复制到编辑轴");
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+/* ---------------------------------------------------------------- 预览 */
+
+/* 上半：你正在改的片子，跟着编辑轴的播放头 */
+function paintMainAt(t) {
   if (!state.derived) return;
   $("#preview").src = `/api/p/${state.name}/frame?at=${t.toFixed(2)}&v=${Date.now()}`;
-  const hit = shotAtTime(t);
+  const hit = shotAtTime(TRACKS.edit, t);
   $("#preview-label").textContent = hit
-    ? `${t.toFixed(2)}s · 第 ${hit.i + 1} 句 · 镜头 ${hit.sh.index + 1}`
+    ? `${t.toFixed(2)}s · 第 ${hit.i + 1} 句 · 镜头 ${(hit.sh?.index ?? 0) + 1}`
     : `${t.toFixed(2)}s`;
+}
 
-  const cmp = state.derived.compare;
+/* 下半：原片，跟着原片轨的播放头 —— 和上面完全独立 */
+function paintCompareAt(t) {
+  const rt = state.derived?.reference_timeline;
+  const cmp = state.derived?.compare;
+  const path = rt?.path || cmp?.path;
   const box = $("#compare-box");
-  const show = state.compareOn && !!cmp;
+  const show = state.compareOn && !!path;
   box.classList.toggle("hidden", !show);
-  if (show) {
-    const ct = Math.max(0, t + (cmp.offset || 0));
-    $("#compare-img").src =
-      `/api/p/${state.name}/thumb?path=${encodeURIComponent(cmp.path)}&t=${ct.toFixed(2)}&w=480`;
-  }
+  if (!show) return;
+  const ct = Math.max(0, t + (rt ? 0 : cmp?.offset || 0));
+  $("#compare-img").src =
+    `/api/p/${state.name}/thumb?path=${encodeURIComponent(path)}&t=${ct.toFixed(2)}&w=480`;
+}
+
+function paintPreviewAt(t) {
+  paintMainAt(t);
+  paintCompareAt(state.refPlayhead);
 }
 
 /* ---------------------------------------------------------------- 选文件 */
