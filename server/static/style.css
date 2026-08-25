@@ -444,3 +444,9 @@ main { flex: 1; display: flex; min-height: 0; }
 .ref-card .txt { margin-top: 2px; font-size: 14px; color: var(--text); }
 .ref-card .txt.empty { color: var(--dim); }
 .ref-card .meta { margin-top: 3px; font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
+
+.tl-blank {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  height: 76px; font-size: 12px; color: var(--dim);
+  background: repeating-linear-gradient(45deg, #14161c, #14161c 8px, #111319 8px, #111319 16px);
+}

@@ -1029,8 +1029,14 @@ function paintTrack(tr) {
         text.slice(0, 20))}</span>${shots}</div>`;
     })
     .join("");
-  if (!clips.length) {
-    inner.innerHTML = `<div class="tl-shot" style="width:100%"><div class="tl-empty"></div></div>`;
+  // 编辑轴还是空的时候，别让人对着一个小方块发呆
+  const blank = tr.key === "edit" && state.project.clips.every(
+    (c) => !c.text.trim() && !shotsOf(c)[0]?.path);
+  if (!clips.length || blank) {
+    inner.innerHTML = `<div class="tl-blank">${
+      tr.key === "edit"
+        ? "编辑轴是空的 —— 点右上角「整条复制到编辑轴」照着原片改，或者直接在下面写第一句"
+        : "没有原片"}</div>`;
   }
   moveHead(tr);
 }
