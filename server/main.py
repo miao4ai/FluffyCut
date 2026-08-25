@@ -150,6 +150,7 @@ def view(project: Project, name: str) -> dict[str, Any]:
                         "src_in": v.src_in,
                         "src_out": v.src_out,
                         "speed": v.speed,
+                        "crop": dict(zip(("top", "right", "bottom", "left"), v.crop)),
                         "exists": v.type == "color" or project.exists(v.path),
                     }
                     for j, (v, s0, dur) in enumerate(project.shots_of(c))

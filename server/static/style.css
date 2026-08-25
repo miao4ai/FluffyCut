@@ -336,3 +336,9 @@ main { flex: 1; display: flex; min-height: 0; }
 /* 配乐试听 */
 #music-player { width: 100%; height: 32px; margin-bottom: 8px; }
 #music-devocal-note { margin-top: 2px; }
+
+.trim.crop { margin-top: 6px; background: #101218; }
+.trim.crop input { width: 56px; }
+.trim.crop .hint { margin-left: auto; font-size: 11px; }
+
+.topbar button { white-space: nowrap; }   /* 窄窗口时按钮别竖着断行 */

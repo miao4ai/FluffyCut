@@ -324,6 +324,18 @@ def kenburns_for(clip: Clip, amount: float = 0.12) -> KenBurns | None:
     return kenburns_from(clip.kenburns, clip.id, amount)
 
 
+def _crop(src: Image.Image, shot: Visual) -> Image.Image:
+    """和渲染器 _crop_chain 同一套比例，预览才对得上。"""
+    if not any(shot.crop):
+        return src
+    top, right, bottom, left = shot.crop
+    x0, y0 = int(src.width * left), int(src.height * top)
+    x1, y1 = int(src.width * (1 - right)), int(src.height * (1 - bottom))
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        return src
+    return src.crop((x0, y0, x1, y1))
+
+
 def _fit(src: Image.Image, size: tuple[int, int], mode: str, bg: RGBA) -> Image.Image:
     W, H = size
     canvas = Image.new("RGBA", size, bg)
@@ -358,7 +370,7 @@ def render_visual(project: Project, clip: Clip, t: float) -> Image.Image:
     if shot.type == "image" and shot.path:
         path = project.resolve(shot.path)
         if path and path.exists():
-            base = _fit(Image.open(path).convert("RGBA"), size, shot.fit, bg)
+            base = _fit(_crop(Image.open(path).convert("RGBA"), shot), size, shot.fit, bg)
         else:
             base = Image.new("RGBA", size, parse_color(shot.color, (16, 16, 20, 255)))
     elif shot.type == "video" and shot.path:
@@ -395,7 +407,7 @@ def _extract_video_frame(project: Project, shot: Visual, t: float, size, bg) -> 
            "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-"]
     try:
         out = subprocess.run(cmd, capture_output=True, timeout=30).stdout
-        return _fit(Image.open(io.BytesIO(out)).convert("RGBA"), size, shot.fit, bg)
+        return _fit(_crop(Image.open(io.BytesIO(out)).convert("RGBA"), shot), size, shot.fit, bg)
     except Exception:
         return Image.new("RGBA", size, bg)
 

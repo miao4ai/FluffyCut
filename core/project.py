@@ -51,6 +51,23 @@ def estimate_duration(text: str) -> float:
     return round(min(MAX_DURATION, max(MIN_DURATION, n / CHARS_PER_SECOND + TAIL_PAD)), 2)
 
 
+def _crop(value: Any) -> tuple[float, float, float, float]:
+    """裁切写成 {"top":0.18} 这种，只写要裁的边。四边都按比例，0.18 = 裁掉 18%。
+
+    烧死在原片里的字幕就是这么去掉的 —— 它是像素，改不了，只能裁走或遮住。
+    """
+    if not value:
+        return (0.0, 0.0, 0.0, 0.0)
+    if isinstance(value, (list, tuple)) and len(value) == 4:
+        vals = [max(0.0, min(0.9, float(v or 0))) for v in value]
+        return (vals[0], vals[1], vals[2], vals[3])
+    if not isinstance(value, dict):
+        return (0.0, 0.0, 0.0, 0.0)
+    return tuple(  # type: ignore[return-value]
+        max(0.0, min(0.9, float(value.get(k) or 0))) for k in ("top", "right", "bottom", "left")
+    )
+
+
 def _num(value: Any, default: float | None = None) -> float | None:
     if value is None or value == "":
         return default
@@ -77,6 +94,7 @@ class Visual:
     src_in: float = 0.0            # 素材入点（秒），JSON 里写 "in"
     src_out: float | None = None   # 素材出点（秒），JSON 里写 "out"，None = 到结尾
     speed: float = 1.0             # 变速，2.0 = 两倍速
+    crop: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)   # 上右下左，各裁掉多少（比例）
     seconds: float | None = None   # 这个镜头在本句里占多久，不写就和同句其他镜头平分
     prompt: str | None = None      # 配图 prompt，留着复现
 
@@ -91,6 +109,7 @@ class Visual:
             src_in=_num(d.get("in"), 0.0) or 0.0,
             src_out=_num(d.get("out"), None),
             speed=_num(d.get("speed"), 1.0) or 1.0,
+            crop=_crop(d.get("crop")),
             seconds=_num(d.get("seconds"), None),
             prompt=d.get("prompt"),
         )
@@ -104,6 +123,9 @@ class Visual:
             raise ProjectError("visual.speed 必须大于 0")
         if v.src_out is not None and v.src_out <= v.src_in:
             raise ProjectError(f"素材出点（{v.src_out}）必须大于入点（{v.src_in}）")
+        top, right, bottom, left = v.crop
+        if top + bottom >= 0.95 or left + right >= 0.95:
+            raise ProjectError("裁切上下（或左右）加起来不能把画面裁没了")
         return v
 
     def to_dict(self) -> dict[str, Any]:
@@ -120,6 +142,10 @@ class Visual:
             d["out"] = round(self.src_out, 3)
         if self.speed != 1.0:
             d["speed"] = round(self.speed, 3)
+        if any(self.crop):
+            top, right, bottom, left = self.crop
+            d["crop"] = {k: round(v, 4) for k, v in
+                         (("top", top), ("right", right), ("bottom", bottom), ("left", left)) if v}
         if self.seconds is not None:
             d["seconds"] = round(self.seconds, 3)
         if self.prompt:

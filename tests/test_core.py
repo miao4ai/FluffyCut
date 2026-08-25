@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 from core import ai, analyze, fonts, layers, settings, subtitle
-from core.project import Clip, Project, ProjectError, estimate_duration
+from core.project import Clip, Project, ProjectError, Visual, estimate_duration
 from core.render import RenderOptions, build_command
 from core.tts import is_stale, text_sha
 
@@ -464,3 +464,39 @@ class TestSettings(unittest.TestCase):
         key, source = ai.credential()
         self.assertEqual(key, "sk-ant-stored")
         self.assertEqual(source, "本机配置")
+
+
+class TestCrop(unittest.TestCase):
+    """裁切：原片烧死的字幕只能靠裁掉，所以这条路必须稳。"""
+
+    def _visual(self, crop):
+        return Visual.from_dict({"type": "video", "path": "a.mp4", "crop": crop})
+
+    def test_only_given_sides_are_kept(self):
+        v = self._visual({"bottom": 0.22})
+        self.assertEqual(v.crop, (0.0, 0.0, 0.22, 0.0))
+        self.assertEqual(v.to_dict()["crop"], {"bottom": 0.22})
+
+    def test_no_crop_field_when_nothing_cropped(self):
+        self.assertNotIn("crop", self._visual(None).to_dict())
+
+    def test_over_cropping_is_rejected(self):
+        with self.assertRaises(ProjectError):
+            self._visual({"top": 0.6, "bottom": 0.5})
+
+    def test_values_are_clamped(self):
+        self.assertEqual(self._visual({"left": 2.0}).crop[3], 0.9)
+
+    def test_render_crops_before_fitting(self):
+        """必须先裁再铺满 —— 反过来就把裁掉的部分又拉回画面里了。"""
+        import tempfile
+
+        p = Project.from_dict({"clips": [
+            {"id": "a", "duration": 2.0,
+             "visual": {"type": "video", "path": "assets/clip.mp4", "crop": {"bottom": 0.2}}},
+        ]}, DEMO)
+        with tempfile.TemporaryDirectory() as tmp:
+            cmd = build_command(p, Path(tmp) / "o.mp4", Path(tmp), RenderOptions())
+        graph = cmd[cmd.index("-filter_complex") + 1]
+        self.assertIn("crop=w=iw*1.0000:h=ih*0.8000:x=iw*0.0000:y=ih*0.0000", graph)
+        self.assertLess(graph.index("crop=w=iw*1.0000"), graph.index("scale=w="))

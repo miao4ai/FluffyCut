@@ -50,6 +50,15 @@ def _hex_to_ff(color: str, default: str = "0x000000") -> str:
     return f"0x{r:02X}{g:02X}{b:02X}"
 
 
+def _crop_chain(shot: Visual) -> str:
+    """按比例裁掉四边。放在适配之前 —— 先把不要的部分切掉，再去铺满画布。"""
+    top, right, bottom, left = shot.crop
+    if not any(shot.crop):
+        return ""
+    return (f"crop=w=iw*{1 - left - right:.4f}:h=ih*{1 - top - bottom:.4f}"
+            f":x=iw*{left:.4f}:y=ih*{top:.4f},")
+
+
 def _fit_chain(fit: str, w: int, h: int, bg: str) -> str:
     if fit == "contain":
         return (f"scale=w={w}:h={h}:force_original_aspect_ratio=decrease:flags=lanczos,"
@@ -128,14 +137,14 @@ def build_command(project: Project, out: Path, workdir: Path, opts: RenderOption
             if shot.type == "image":
                 i = add_input(["-loop", "1", "-framerate", FPS, "-t", f"{render_dur:.3f}",
                                "-i", project.resolve(shot.path)])
-                chain = f"[{i}:v]{_fit_chain(shot.fit, tw, th, v.bg)},setsar=1,fps={FPS}"
+                chain = f"[{i}:v]{_crop_chain(shot)}{_fit_chain(shot.fit, tw, th, v.bg)},setsar=1,fps={FPS}"
             elif shot.type == "video":
                 need_src = render_dur * shot.speed          # 需要读多少秒原始素材
                 have = shot.src_out - shot.src_in if shot.src_out is not None else None
                 read = min(need_src, have) if have is not None else need_src
                 i = add_input(["-ss", f"{shot.src_in:.3f}", "-t", f"{read:.3f}",
                                "-i", project.resolve(shot.path)])
-                chain = f"[{i}:v]{_fit_chain(shot.fit, tw, th, v.bg)},setsar=1"
+                chain = f"[{i}:v]{_crop_chain(shot)}{_fit_chain(shot.fit, tw, th, v.bg)},setsar=1"
                 if shot.speed != 1.0:
                     chain += f",setpts=PTS/{shot.speed}"
                 chain += f",fps={FPS}"

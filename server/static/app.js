@@ -203,7 +203,16 @@ function trimRow(c, i, dc) {
         <span class="hint" data-srclen>素材 …</span>` : ""}
       <label>占时长<input type="number" step="0.1" min="0.05" value="${sh.fixed ? sh.seconds : ""}" placeholder="平分" data-act="shot-seconds"></label>
       <button class="ghost" data-act="shot-replace">换素材</button>
-    </div>`;
+    </div>
+    ${sh.type === "color" ? "" : `
+    <div class="trim crop">
+      <span class="lab" title="按比例裁掉素材的四边。原片烧死的字幕就是这么去掉的">裁切 %</span>
+      ${["top", "bottom", "left", "right"].map((k) => `
+        <label>${{ top: "上", bottom: "下", left: "左", right: "右" }[k]}
+          <input type="number" step="1" min="0" max="90" data-act="crop-${k}"
+                 value="${Math.round((sh.crop?.[k] || 0) * 100) || ""}" placeholder="0"></label>`).join("")}
+      <span class="hint">原片自带的字幕是像素，改不了，只能裁掉</span>
+    </div>`}`;
 }
 
 /* 两句之间的接缝：默认硬切，选了转场就在这里改时长 */
@@ -442,6 +451,21 @@ async function setShotField(i, j, key, raw) {
   if (num !== null && Number.isNaN(num)) return;
   if (num === null) delete v[key];
   else v[key] = num;
+  setShots(state.project.clips[i], arr);
+  markDirty();
+}
+
+/* 裁切按百分比填，存成比例；填 0 就把这条边删掉，别在 json 里留一堆 0 */
+function setShotCrop(i, j, side, percent) {
+  const arr = shotsOf(state.project.clips[i]);
+  const v = arr[j];
+  if (!v) return;
+  const frac = Math.max(0, Math.min(90, Number(percent) || 0)) / 100;
+  const crop = { ...(v.crop || {}) };
+  if (frac) crop[side] = Math.round(frac * 10000) / 10000;
+  else delete crop[side];
+  if (Object.keys(crop).length) v.crop = crop;
+  else delete v.crop;
   setShots(state.project.clips[i], arr);
   markDirty();
 }
@@ -685,7 +709,8 @@ function bind() {
     if (!row) return;
     const i = +row.dataset.i;
     const key = { "src-in": "in", "src-out": "out", speed: "speed", "shot-seconds": "seconds" }[act];
-    if (key) setShotField(i, state.shot, key, e.target.value);
+    if (key) return setShotField(i, state.shot, key, e.target.value);
+    if (act?.startsWith("crop-")) setShotCrop(i, state.shot, act.slice(5), e.target.value);
   });
 
   // 转场：选类型 / 改时长
