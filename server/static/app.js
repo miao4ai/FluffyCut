@@ -24,6 +24,9 @@ const state = {
   selected: 0,
   shot: 0,
   viewMode: "focus",
+  undo: [],
+  redo: [],
+  lastSaved: null,
   playhead: 0,
   frameT: null,
   frameClipT: null,
@@ -105,8 +108,19 @@ async function open(name) {
 }
 
 function apply(data, name = state.name) {
+  const switched = name !== state.name;
+  // 整条复制、配音、换素材这些不走 save()，也得能撤 —— 尤其"整条复制"会覆盖整个编辑轴
+  if (!switched && state.lastSaved && state.lastSaved !== JSON.stringify(data.project)) {
+    pushUndo();
+  }
   state.name = name;
   state.project = data.project;
+  state.lastSaved = JSON.stringify(data.project);
+  if (switched) {                       // 换工程就别把上一份的撤销链带过来
+    state.undo.length = 0;
+    state.redo.length = 0;
+    state.lastSaved = JSON.stringify(data.project);
+  }
   state.derived = data.derived;
   state.caps = data.caps;
   state.selected = Math.min(state.selected, state.project.clips.length - 1);
@@ -128,6 +142,7 @@ function paintAll() {
   paintMusic();
   paintReference();
   paintTimeline();
+  paintUndo();
   // 导进来的工程默认摆上原片对照 —— 「照着原片改」正是它的用法
   if (state.derived?.compare?.auto && !paintTimeline.autoCompared) {
     paintTimeline.autoCompared = true;
@@ -500,8 +515,28 @@ function markDirty() {
   state.saveTimer = setTimeout(save, 700);
 }
 
-async function save({ repaintList = false } = {}) {
+/* 撤销：每次保存之前，把"上一次保存成功的样子"压进栈。
+   删掉一句、切坏一个镜头、贴字贴歪了 —— ⌘Z 一路退回去，⌘⇧Z 再推回来。
+   存的是整份工程的快照：这个文件本来就不大，比逐条记操作省事得多，也不会漏。 */
+const UNDO_MAX = 60;
+
+function pushUndo() {
+  if (!state.lastSaved) return;
+  state.undo.push(state.lastSaved);
+  if (state.undo.length > UNDO_MAX) state.undo.shift();
+  state.redo.length = 0;                  // 新动作一发生，重做链就断了
+  paintUndo();
+}
+
+function paintUndo() {
+  $("#btn-undo").disabled = !state.undo.length;
+  $("#btn-redo").disabled = !state.redo.length;
+  $("#btn-undo").title = `撤销（⌘Z）· 还能退 ${state.undo.length} 步`;
+}
+
+async function save({ repaintList = false, track = true } = {}) {
   clearTimeout(state.saveTimer);
+  if (track) pushUndo();
   try {
     const data = await api(`/api/p/${state.name}`, {
       method: "PUT",
@@ -510,6 +545,7 @@ async function save({ repaintList = false } = {}) {
     state.derived = data.derived;
     state.project = data.project;
     state.caps = data.caps;
+    state.lastSaved = JSON.stringify(data.project);
     if (repaintList) paintList();
     paintDerived();
     $("#save-state").textContent = "已保存";
@@ -518,6 +554,41 @@ async function save({ repaintList = false } = {}) {
     $("#save-state").textContent = "保存失败";
     toast(e.message, true);
   }
+}
+
+/* 撤销之后，原来指着的那个镜头/那一帧可能已经不存在了 */
+function clampSelection() {
+  state.selected = Math.max(0, Math.min(state.selected, state.project.clips.length - 1));
+  const shots = shotsOf(state.project.clips[state.selected] || { visual: {} });
+  state.shot = Math.max(0, Math.min(state.shot, shots.length - 1));
+  state.frameT = null;
+  state.frameClipT = null;
+}
+
+async function undo() {
+  if (!state.undo.length) return toast("没有可撤销的了");
+  state.redo.push(state.lastSaved);
+  state.project = JSON.parse(state.undo.pop());
+  await save({ repaintList: true, track: false });
+  clampSelection();
+  paintList();
+  paintPreviewAt(state.playhead);
+  paintTimeline();
+  paintUndo();
+  toast("撤销了一步");
+}
+
+async function redo() {
+  if (!state.redo.length) return toast("没有可重做的了");
+  state.undo.push(state.lastSaved);
+  state.project = JSON.parse(state.redo.pop());
+  await save({ repaintList: true, track: false });
+  clampSelection();
+  paintList();
+  paintPreviewAt(state.playhead);
+  paintTimeline();
+  paintUndo();
+  toast("重做了一步");
 }
 
 /* ---------------------------------------------------------------- 片段操作 */
@@ -571,11 +642,17 @@ async function clipAction(i, act) {
     case "dup":
       clips.splice(i + 1, 0, { ...structuredClone(clips[i]), id: newId(), audio: undefined });
       return save({ repaintList: true });
-    case "del":
-      if (clips.length === 1) return toast("至少留一句");
-      clips.splice(i, 1);
-      state.selected = Math.max(0, i - 1);
-      return save({ repaintList: true });
+    case "del": {
+      // 最后一句也能删 —— 换成一句空白的，别用"至少留一句"把人挡在外面
+      const gone = clips[i].text.trim().slice(0, 12);
+      if (clips.length === 1) clips.splice(0, 1, { id: newId(), text: "", visual: { type: "color" } });
+      else clips.splice(i, 1);
+      state.selected = Math.max(0, Math.min(i, clips.length - 1));
+      state.frameT = null;
+      await save({ repaintList: true });
+      paintTimeline();
+      return toast(`删了${gone ? `「${gone}」` : "这一句"}，⌘Z 可以撤销`);
+    }
     case "hear":
       return hearClip(i);
     case "tts":
@@ -1064,6 +1141,8 @@ function bind() {
   try {
     state.viewMode = localStorage.getItem("fluffycut.view") || "focus";
   } catch { /* ignore */ }
+  $("#btn-undo").onclick = undo;
+  $("#btn-redo").onclick = redo;
   $("#btn-prev").onclick = () => step(-1);
   $("#btn-next").onclick = () => step(1);
   $("#btn-viewmode").onclick = () => setViewMode(state.viewMode === "focus" ? "list" : "focus");
@@ -1090,6 +1169,10 @@ function bind() {
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !$("#modal").classList.contains("hidden")) return closeNewDialog();
     const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "");
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
+      e.preventDefault();
+      return e.shiftKey ? redo() : undo();
+    }
     if (!typing && e.key === " ") {
       e.preventDefault();
       return hearClip(state.selected);
